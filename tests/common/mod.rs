@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 
+use litscan_2::classifier::Vectorizer;
 use serde::Deserialize;
 
 #[derive(Debug, Deserialize)]
@@ -25,3 +26,12 @@ pub fn load_fixtures() -> Vec<Fixture> {
         .unwrap_or_else(|e| panic!("failed to open {}: {}", path.display(), e));
     serde_json::from_reader(file).expect("failed to parse test_fixtures.json")
 }
+
+pub fn safetensors_path() -> PathBuf {
+    fixture_dir().join("model.safetensors")
+}
+
+pub fn metadata_path() -> PathBuf {
+    fixture_dir().join("model_metadata.json")
+}
+
