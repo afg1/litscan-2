@@ -14,3 +14,12 @@ fn tokenizer_matches_sklearn() {
         assert_eq!(tokenizer.tokenize(&fixture.text), fixture.tokens);
     }
 }
+
+#[test]
+fn tokenizes_unicode_other_number() {
+    let tok = Tokenizer::new(r"(?u)\b\w\w+\b", true).unwrap();
+    assert_eq!(
+        tok.tokenize("foo ¹³c bar"),
+        vec!["foo".to_string(), "¹³c".to_string(), "bar".to_string()],
+    );
+}
