@@ -37,8 +37,8 @@ pub enum Error {
 #[derive(Debug, Deserialize)]
 pub struct ModelMetadata {
     pub sklearn_version: String,
-    pub n_folds: usize,
-    pub n_features: usize,
+    pub n_folds: u32,
+    pub n_features: u32,
     pub classes: Vec<serde_json::Value>,
     pub vocabulary: HashMap<String, u32>,
     pub tfidf_config: TfidfConfig,
@@ -175,4 +175,76 @@ impl Vectorizer {
     }
 }
 
-pub struct TfidfClassifier {}
+pub struct TfidfClassifier {
+    tokenizer: Tokenizer,
+    vectorizer: Vectorizer,
+    coef: Vec<f64>,
+    intercept: Vec<f64>,
+    sig_a: Vec<f64>,
+    sig_b: Vec<f64>,
+    folds: u32,
+    features: u32
+
+}
+
+pub struct ClassificationResult {
+    pub proba: Vec<f64>,
+    pub fold_decisions: Vec<f64>,
+    pub fold_prob: Vec<f64>,
+    pub label: u32
+}
+
+impl TfidfClassifier {
+    pub fn new(safetensors_path: PathBuf, metadata_path: PathBuf ) -> Result<Self, Error> {
+        let metadata: ModelMetadata = ModelMetadata::from_path(&metadata_path)?;
+        let bytes: Vec<u8> = std::fs::read(&safetensors_path)?;
+        let tensors: SafeTensors = SafeTensors::deserialize(&bytes)?;
+
+        let tok = Tokenizer::new(
+            &metadata.tfidf_config.token_pattern,
+            metadata.tfidf_config.lowercase,
+        )?;
+
+        let vectorizer = Vectorizer::new(safetensors_path, metadata_path)?;
+
+        let coef = read_tensors_f64(&tensors, "coef")?;
+        let intercept = read_tensors_f64(&tensors, "intercept")?;
+        let sigmoid_a = read_tensors_f64(&tensors, "sigmoid_a")?;
+        let sigmoid_b = read_tensors_f64(&tensors, "sigmoid_b")?;
+        
+        Ok(Self {
+            tokenizer: tok,
+            vectorizer: vectorizer,
+            coef: coef,
+            intercept: intercept,
+            folds: metadata.n_folds,
+            features: metadata.n_features,
+            sig_a: sigmoid_a,
+            sig_b: sigmoid_b
+        })
+
+    }
+
+    pub fn classify(&self, text: &str) -> ClassificationResult {
+
+        let feature_vec: SparseVector = self.vectorizer.vectorize(text);
+
+        let mut fold_decisions: Vec<f64> = self.intercept.clone();
+        let mut fold_probs: Vec<f64> = vec![0.0, 0.0, 0.0, 0.0, 0.0];
+        for fold in 0 .. self.folds as usize {
+            for (&index, &value) in feature_vec.indices.iter().zip(feature_vec.values.iter()) {
+                fold_decisions[fold] += self.coef[fold * self.features as usize + index as usize] * value  ;
+            }
+            fold_probs[fold] = 1.0 / (1.0 + (self.sig_a[fold] * fold_decisions[fold] + self.sig_b[fold]).exp());
+
+        }
+        
+        let final_prob = fold_probs.iter().sum::<f64>() / self.folds as f64;
+        ClassificationResult{
+            proba: vec![(1.0 - final_prob), final_prob],
+            fold_decisions: fold_decisions,
+            fold_prob: fold_probs,
+            label: (final_prob > 0.5) as u32
+        }
+    }
+}
