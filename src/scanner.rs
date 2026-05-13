@@ -5,7 +5,8 @@ use std::io::{self, BufRead};
 use std::fs::File;
 use thiserror::Error;
 
-use serde::{Serialize, Deserialize};
+use pyo3::prelude::*;
+use pyo3::exceptions::PyRuntimeError;
 
 #[derive(Debug, Error)]
 pub enum Error {
@@ -19,15 +20,27 @@ pub enum Error {
     BuildError(#[from] BuildError)
 }
 
+impl From<Error> for PyErr {
+    fn from(err: Error) -> PyErr {
+        PyRuntimeError::new_err(err.to_string())
+    }
+}
+
+#[pyclass]
 pub struct PatternIndex {
     pub automaton: AhoCorasick,
+    #[pyo3(get)]
     pub metadata: PatternMetadata
 }
 
+#[pyclass]
+#[derive(Clone)]
 pub struct PatternMetadata {
     pub urs_offsets: Vec<u32>,
     pub urs_indices: Vec<u32>,
     pub urs_table: Vec<String>,
+    #[pyo3(get)]
+    pub n_patterns: u32,
 }
 
 
@@ -82,7 +95,6 @@ pub fn build_search_automaton(id_list: PathBuf) -> Result<PatternIndex, Error>  
         urs_offsets.push(urs_indices.len() as u32);
         pattern_strings.push(pattern)
     }
-    println!("{:?}", pattern_strings);
     let automaton = AhoCorasickBuilder::new()
     .match_kind(MatchKind::LeftmostLongest)
     .ascii_case_insensitive(true)
@@ -95,7 +107,8 @@ pub fn build_search_automaton(id_list: PathBuf) -> Result<PatternIndex, Error>  
             metadata: PatternMetadata { 
                 urs_offsets: urs_offsets, 
                 urs_indices: urs_indices, 
-                urs_table: urs_table 
+                urs_table: urs_table,
+                n_patterns: pattern_strings.len() as u32
             } 
         }
     )
