@@ -35,3 +35,6 @@ pub fn metadata_path() -> PathBuf {
     fixture_dir().join("model_metadata.json")
 }
 
+pub fn test_ids() -> PathBuf {
+    fixture_dir().join("all_hgnc_ids.txt")
+}
