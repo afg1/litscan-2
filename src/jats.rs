@@ -1,6 +1,7 @@
 use roxmltree::Document;
 use std::collections::HashMap;
 use std::error::Error;
+use std::fmt;
 use strsim::jaro_winkler;
 
 #[derive(Clone, Debug)]
@@ -18,15 +19,125 @@ impl Author {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SectionKind {
+    Abstract,
+    Introduction,
+    Methods,
+    Results,
+    Discussion,
+    Conclusion,
+    Supplementary,
+    Other,
+}
+
+impl SectionKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            SectionKind::Abstract => "abstract",
+            SectionKind::Introduction => "introduction",
+            SectionKind::Methods => "methods",
+            SectionKind::Results => "results",
+            SectionKind::Discussion => "discussion",
+            SectionKind::Conclusion => "conclusion",
+            SectionKind::Supplementary => "supplementary",
+            SectionKind::Other => "other",
+        }
+    }
+
+    pub fn classify(sec_type: Option<&str>, title: Option<&str>) -> SectionKind {
+        if let Some(st) = sec_type {
+            let st = st.to_lowercase();
+            // Normalize separators; sec-type may use `|` for combined values.
+            let parts: Vec<&str> = st.split(|c: char| c == '|' || c == ',' || c.is_whitespace())
+                .filter(|p| !p.is_empty())
+                .collect();
+            let has = |needle: &str| parts.iter().any(|p| *p == needle);
+
+            if has("supplementary-material") || st.contains("supplementary-material") {
+                return SectionKind::Supplementary;
+            }
+            if has("abstract") {
+                return SectionKind::Abstract;
+            }
+            if has("intro") || has("introduction") {
+                return SectionKind::Introduction;
+            }
+            // Combined results|discussion → Results wins
+            if has("results") {
+                return SectionKind::Results;
+            }
+            if has("discussion") {
+                return SectionKind::Discussion;
+            }
+            if has("methods") || has("materials") || st.contains("materials|methods")
+                || st.contains("methods|materials")
+            {
+                return SectionKind::Methods;
+            }
+            if has("conclusion") || has("conclusions") {
+                return SectionKind::Conclusion;
+            }
+        }
+
+        if let Some(t) = title {
+            let t = t.trim().to_lowercase();
+            if t.is_empty() {
+                return SectionKind::Other;
+            }
+
+            // Supplementary first — catches "Supplementary Methods" etc.
+            if t.contains("supplementary")
+                || t.contains("supporting information")
+                || t.contains("supporting info")
+                || t.contains("appendix")
+            {
+                return SectionKind::Supplementary;
+            }
+            if t.starts_with("abstract") || t == "summary" {
+                return SectionKind::Abstract;
+            }
+            if t.contains("introduction") || t.contains("background") {
+                return SectionKind::Introduction;
+            }
+            if t.contains("method")
+                || t.contains("materials and methods")
+                || t.contains("experimental")
+                || t.contains("procedure")
+            {
+                return SectionKind::Methods;
+            }
+            if t.contains("result") || t.contains("findings") {
+                return SectionKind::Results;
+            }
+            if t.contains("discussion") {
+                return SectionKind::Discussion;
+            }
+            if t.contains("conclusion") {
+                return SectionKind::Conclusion;
+            }
+        }
+
+        SectionKind::Other
+    }
+}
+
+impl fmt::Display for SectionKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Section {
     pub title: Option<String>,
     pub text: String,
+    pub kind: SectionKind,
 }
 
 impl Section {
-    fn new(title: Option<String>, text: String) -> Self {
-        Section { title, text }
+    fn new(title: Option<String>, text: String, kind: SectionKind) -> Self {
+        Section { title, text, kind }
     }
 }
 
@@ -51,7 +162,7 @@ impl JatsArticle {
         }
     }
 
-    fn full_text(&self) -> String {
+    pub fn full_text(&self) -> String {
         let mut full_text = String::new();
         for section in &self.sections {
             if let Some(title) = &section.title {
@@ -64,7 +175,11 @@ impl JatsArticle {
         full_text.trim().to_string()
     }
 
-    fn get_section(&self, name: &str) -> Option<Section> {
+    pub fn sections_of_kind(&self, kind: SectionKind) -> impl Iterator<Item = &Section> {
+        self.sections.iter().filter(move |s| s.kind == kind)
+    }
+
+    pub fn get_section(&self, name: &str) -> Option<Section> {
         let name_lower = name.to_lowercase();
         let mut best_match: Option<&Section> = None;
         let mut best_score = 0.0;
@@ -129,7 +244,14 @@ fn parse_article_node(article_node: roxmltree::Node) -> JatsArticle {
         .descendants()
         .find(|n| n.has_tag_name("abstract"))
     {
-        article.abstract_text = collect_text(abstract_node).into();
+        article.abstract_text = collect_text(abstract_node);
+        if let Some(text) = &article.abstract_text {
+            article.sections.push(Section::new(
+                Some("Abstract".to_string()),
+                text.clone(),
+                SectionKind::Abstract,
+            ));
+        }
     }
 
     for contrib in article_node
@@ -166,6 +288,8 @@ fn parse_article_node(article_node: roxmltree::Node) -> JatsArticle {
                 .children()
                 .find(|n| n.has_tag_name("title"))
                 .and_then(|n| collect_text(n));
+            let sec_type = sec_node.attribute("sec-type");
+            let kind = SectionKind::classify(sec_type, title.as_deref());
             let mut text = String::new();
             for p_node in sec_node.descendants().filter(|n| n.has_tag_name("p")) {
                 if let Some(t) = collect_text(p_node) {
@@ -176,6 +300,7 @@ fn parse_article_node(article_node: roxmltree::Node) -> JatsArticle {
             article.sections.push(Section {
                 title,
                 text: text.trim().to_string(),
+                kind,
             });
         }
     }
@@ -258,5 +383,89 @@ fn collect_text(node: roxmltree::Node) -> Option<String> {
         None
     } else {
         Some(trimmed.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn classify_from_sec_type() {
+        assert_eq!(SectionKind::classify(Some("intro"), None), SectionKind::Introduction);
+        assert_eq!(SectionKind::classify(Some("introduction"), None), SectionKind::Introduction);
+        assert_eq!(SectionKind::classify(Some("materials|methods"), None), SectionKind::Methods);
+        assert_eq!(SectionKind::classify(Some("methods"), None), SectionKind::Methods);
+        assert_eq!(SectionKind::classify(Some("results"), None), SectionKind::Results);
+        assert_eq!(SectionKind::classify(Some("results|discussion"), None), SectionKind::Results);
+        assert_eq!(SectionKind::classify(Some("discussion"), None), SectionKind::Discussion);
+        assert_eq!(SectionKind::classify(Some("conclusions"), None), SectionKind::Conclusion);
+        assert_eq!(SectionKind::classify(Some("supplementary-material"), None), SectionKind::Supplementary);
+        assert_eq!(SectionKind::classify(Some("cases"), None), SectionKind::Other);
+    }
+
+    #[test]
+    fn classify_from_title() {
+        assert_eq!(SectionKind::classify(None, Some("Introduction")), SectionKind::Introduction);
+        assert_eq!(SectionKind::classify(None, Some("Background")), SectionKind::Introduction);
+        assert_eq!(SectionKind::classify(None, Some("Materials and Methods")), SectionKind::Methods);
+        assert_eq!(SectionKind::classify(None, Some("Experimental procedure")), SectionKind::Methods);
+        assert_eq!(SectionKind::classify(None, Some("Results")), SectionKind::Results);
+        assert_eq!(SectionKind::classify(None, Some("Findings")), SectionKind::Results);
+        assert_eq!(SectionKind::classify(None, Some("Discussion")), SectionKind::Discussion);
+        assert_eq!(SectionKind::classify(None, Some("Conclusions")), SectionKind::Conclusion);
+        assert_eq!(SectionKind::classify(None, Some("Abstract")), SectionKind::Abstract);
+        assert_eq!(SectionKind::classify(None, Some("Summary")), SectionKind::Abstract);
+        assert_eq!(SectionKind::classify(None, Some("Supplementary Methods")), SectionKind::Supplementary);
+        assert_eq!(SectionKind::classify(None, Some("Supporting Information")), SectionKind::Supplementary);
+        assert_eq!(SectionKind::classify(None, Some("Appendix A")), SectionKind::Supplementary);
+        assert_eq!(SectionKind::classify(None, Some("Acknowledgements")), SectionKind::Other);
+    }
+
+    #[test]
+    fn classify_empty_inputs() {
+        assert_eq!(SectionKind::classify(None, None), SectionKind::Other);
+        assert_eq!(SectionKind::classify(None, Some("")), SectionKind::Other);
+    }
+
+    #[test]
+    fn end_to_end_parse_sets_kinds() {
+        let xml = r#"<?xml version="1.0"?>
+<article article-type="research-article">
+  <front>
+    <journal-meta><journal-title>Test J</journal-title></journal-meta>
+    <article-meta>
+      <title-group><article-title>A title</article-title></title-group>
+      <abstract><p>An abstract paragraph.</p></abstract>
+    </article-meta>
+  </front>
+  <body>
+    <sec sec-type="intro"><title>Background</title><p>Intro body.</p></sec>
+    <sec><title>Materials and Methods</title><p>Did stuff.</p></sec>
+    <sec sec-type="results"><title>Results</title><p>Found stuff.</p></sec>
+    <sec><title>Discussion</title><p>Thoughts.</p></sec>
+    <sec sec-type="supplementary-material"><title>Supplementary Data</title><p>Extras.</p></sec>
+    <sec><title>Appendix</title><p>More extras.</p></sec>
+    <sec><title>Weirdly Named Section</title><p>Whatever.</p></sec>
+  </body>
+</article>"#;
+        let article = parse(xml).expect("parse");
+        let kinds: Vec<SectionKind> = article.sections.iter().map(|s| s.kind).collect();
+        assert_eq!(
+            kinds,
+            vec![
+                SectionKind::Abstract,
+                SectionKind::Introduction,
+                SectionKind::Methods,
+                SectionKind::Results,
+                SectionKind::Discussion,
+                SectionKind::Supplementary,
+                SectionKind::Supplementary,
+                SectionKind::Other,
+            ]
+        );
+
+        let supp_count = article.sections_of_kind(SectionKind::Supplementary).count();
+        assert_eq!(supp_count, 2);
     }
 }
