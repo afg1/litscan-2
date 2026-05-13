@@ -218,7 +218,7 @@ impl JatsArticle {
     }
 }
 
-fn parse_article_node(article_node: roxmltree::Node) -> JatsArticle {
+pub fn parse_article_node(article_node: roxmltree::Node) -> JatsArticle {
     let mut article = JatsArticle::new();
 
     article.article_type = article_node.attribute("article-type").map(String::from);
@@ -408,46 +408,52 @@ pub fn parse(xml_string: &str) -> Result<JatsArticle, Box<dyn Error>> {
 }
 
 pub fn parse_archive(xml_string: &str) -> Result<HashMap<String, JatsArticle>, Box<dyn Error>> {
+    let doc = parse_document(xml_string)?;
+    let mut articles = HashMap::new();
+    for (pmcid, node) in article_nodes(&doc) {
+        articles.insert(pmcid, parse_article_node(node));
+    }
+    Ok(articles)
+}
+
+/// Parse a JATS archive XML into a `Document` without materializing any
+/// `JatsArticle`. Pair with `article_nodes` to walk articles one at a time,
+/// optionally in parallel via rayon.
+pub fn parse_document(xml_string: &str) -> Result<Document, Box<dyn Error>> {
     let parsing_opts = roxmltree::ParsingOptions {
         allow_dtd: true,
         ..Default::default()
     };
-    let doc = Document::parse_with_options(xml_string, parsing_opts)
-        .map_err(|e| format!("Failed to parse XML: {}", e))?;
+    Document::parse_with_options(xml_string, parsing_opts)
+        .map_err(|e| format!("Failed to parse XML: {}", e).into())
+}
 
-    let mut articles = HashMap::new();
-
-    for article_node in doc
-        .root()
+/// Yield `(pmcid, article_node)` pairs for every `<article>` in `doc` that has
+/// a pmcid. Articles without a pmcid are skipped. Nodes are cheap `Copy` views
+/// into `doc`; pass them to `parse_article_node` to materialize a `JatsArticle`.
+///
+/// `roxmltree::Node` is `Copy + Send + Sync`, so the typical parallel pattern is:
+///   let nodes: Vec<_> = article_nodes(&doc).collect();
+///   nodes.par_iter().map(|(pmcid, node)| {
+///       let article = parse_article_node(*node);
+///       (pmcid.clone(), scanner::search_article(searcher, &article))
+///   }).collect()
+pub fn article_nodes<'a, 'input>(
+    doc: &'a Document<'input>,
+) -> impl Iterator<Item = (String, roxmltree::Node<'a, 'input>)> + 'a {
+    doc.root()
         .descendants()
         .filter(|n| n.has_tag_name("article"))
-    {
-        let mut pmcid = None;
+        .filter_map(|article_node| extract_pmcid(article_node).map(|id| (id, article_node)))
+}
 
-        // Find the pmcid within this article node
-        for id_node in article_node
-            .descendants()
-            .filter(|n| n.has_tag_name("article-id"))
-        {
-            if id_node.attribute("pub-id-type") == Some("pmcid") {
-                if let Some(text) = id_node.text() {
-                    pmcid = Some(text.trim().to_string());
-                    break;
-                }
-            }
-        }
-
-        if let Some(id) = pmcid {
-            articles.insert(id, parse_article_node(article_node));
-        } else {
-            // If we can't find a pmcid, skip this article or use a fallback identifier?
-            // User requested mapping PMCID: Article, so we'll skip if no PMCID is found.
-            // Could also fall back to DOI or generic id if PMCID isn't strictly required
-            // but the prompt explicitly asked for dict mapping PMCID: Article.
-        }
-    }
-
-    Ok(articles)
+fn extract_pmcid(article_node: roxmltree::Node) -> Option<String> {
+    article_node
+        .descendants()
+        .filter(|n| n.has_tag_name("article-id"))
+        .find(|n| n.attribute("pub-id-type") == Some("pmcid"))
+        .and_then(|n| n.text())
+        .map(|s| s.trim().to_string())
 }
 
 fn collect_text(node: roxmltree::Node) -> Option<String> {
