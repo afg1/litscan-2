@@ -1,6 +1,6 @@
 use aho_corasick::{AhoCorasickBuilder, AhoCorasick, AhoCorasickKind, MatchKind, PatternID, BuildError};
 use unicode_segmentation::UnicodeSegmentation;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::io::{self, BufRead};
 use std::fs::File;
@@ -153,6 +153,7 @@ pub fn search_article(searcher: &PatternIndex, article: &JatsArticle) -> Result<
     
     let mut hits = vec![];
     for section in &article.sections {
+        let mut seen_sentences: HashMap<&str, HashSet<String> > = HashMap::new();
         let haystack= &section.text;
         let sentence_bounds = segment_text(&haystack);
         for mat in searcher.automaton.find_iter(haystack) {
@@ -176,9 +177,17 @@ pub fn search_article(searcher: &PatternIndex, article: &JatsArticle) -> Result<
                     sentence = haystack[start..end].to_string();
                 }
             }
-
-
             let symbol = &haystack[mat.start()..mat.end()];
+            // only insert any given sentence once
+            if !seen_sentences.entry(&symbol).or_default().contains(&sentence){
+                seen_sentences.entry(&symbol).and_modify(|s| { s.insert(sentence.clone());} );
+            }
+            else {
+                continue
+            }
+
+
+            
             let pid = mat.pattern().as_usize();
             let urs_range = searcher.metadata.urs_offsets[pid] as usize
                             .. searcher.metadata.urs_offsets[pid + 1] as usize;
