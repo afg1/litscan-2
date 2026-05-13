@@ -28,6 +28,8 @@ pub enum SectionKind {
     Discussion,
     Conclusion,
     Supplementary,
+    Figure,
+    Table,
     Other,
 }
 
@@ -41,6 +43,8 @@ impl SectionKind {
             SectionKind::Discussion => "discussion",
             SectionKind::Conclusion => "conclusion",
             SectionKind::Supplementary => "supplementary",
+            SectionKind::Figure => "figure",
+            SectionKind::Table => "table",
             SectionKind::Other => "other",
         }
     }
@@ -291,7 +295,10 @@ fn parse_article_node(article_node: roxmltree::Node) -> JatsArticle {
             let sec_type = sec_node.attribute("sec-type");
             let kind = SectionKind::classify(sec_type, title.as_deref());
             let mut text = String::new();
-            for p_node in sec_node.descendants().filter(|n| n.has_tag_name("p")) {
+            for p_node in sec_node.descendants().filter(|n| {
+                n.has_tag_name("p")
+                    && !n.ancestors().any(|a| a.has_tag_name("fig") || a.has_tag_name("table-wrap"))
+            }) {
                 if let Some(t) = collect_text(p_node) {
                     text.push_str(&t);
                     text.push('\n');
@@ -302,6 +309,82 @@ fn parse_article_node(article_node: roxmltree::Node) -> JatsArticle {
                 text: text.trim().to_string(),
                 kind,
             });
+        }
+
+        for fig_node in body_node.descendants().filter(|n| n.has_tag_name("fig")) {
+            let label = fig_node
+                .children()
+                .find(|n| n.has_tag_name("label"))
+                .and_then(collect_text);
+            let caption_node = fig_node.children().find(|n| n.has_tag_name("caption"));
+            let caption_title = caption_node
+                .and_then(|c| c.children().find(|n| n.has_tag_name("title")))
+                .and_then(collect_text);
+            let title = match (label, caption_title) {
+                (Some(l), Some(t)) => Some(format!("{}: {}", l, t)),
+                (Some(l), None) => Some(l),
+                (None, Some(t)) => Some(t),
+                (None, None) => None,
+            };
+            let mut text = String::new();
+            if let Some(caption) = caption_node {
+                for p_node in caption.descendants().filter(|n| n.has_tag_name("p")) {
+                    if let Some(t) = collect_text(p_node) {
+                        text.push_str(&t);
+                        text.push('\n');
+                    }
+                }
+            }
+            let text = text.trim().to_string();
+            if title.is_some() || !text.is_empty() {
+                article.sections.push(Section {
+                    title,
+                    text,
+                    kind: SectionKind::Figure,
+                });
+            }
+        }
+
+        for tw_node in body_node.descendants().filter(|n| n.has_tag_name("table-wrap")) {
+            let label = tw_node
+                .children()
+                .find(|n| n.has_tag_name("label"))
+                .and_then(collect_text);
+            let caption_node = tw_node.children().find(|n| n.has_tag_name("caption"));
+            let caption_title = caption_node
+                .and_then(|c| c.children().find(|n| n.has_tag_name("title")))
+                .and_then(collect_text);
+            let title = match (label, caption_title) {
+                (Some(l), Some(t)) => Some(format!("{}: {}", l, t)),
+                (Some(l), None) => Some(l),
+                (None, Some(t)) => Some(t),
+                (None, None) => None,
+            };
+            let mut text = String::new();
+            if let Some(caption) = caption_node {
+                for p_node in caption.descendants().filter(|n| n.has_tag_name("p")) {
+                    if let Some(t) = collect_text(p_node) {
+                        text.push_str(&t);
+                        text.push('\n');
+                    }
+                }
+            }
+            for foot_node in tw_node.children().filter(|n| n.has_tag_name("table-wrap-foot")) {
+                for p_node in foot_node.descendants().filter(|n| n.has_tag_name("p")) {
+                    if let Some(t) = collect_text(p_node) {
+                        text.push_str(&t);
+                        text.push('\n');
+                    }
+                }
+            }
+            let text = text.trim().to_string();
+            if title.is_some() || !text.is_empty() {
+                article.sections.push(Section {
+                    title,
+                    text,
+                    kind: SectionKind::Table,
+                });
+            }
         }
     }
 
@@ -467,5 +550,92 @@ mod tests {
 
         let supp_count = article.sections_of_kind(SectionKind::Supplementary).count();
         assert_eq!(supp_count, 2);
+    }
+
+    #[test]
+    fn figures_are_extracted_separately() {
+        let xml = r#"<?xml version="1.0"?>
+<article>
+  <body>
+    <sec sec-type="results"><title>Results</title>
+      <p>Body text mentions Airn.</p>
+      <fig id="fig1">
+        <label>Figure 1</label>
+        <caption><title>Airn locus</title><p>Dotted line: TSS of Airn.</p></caption>
+      </fig>
+    </sec>
+    <fig id="fig2">
+      <label>Figure 2</label>
+      <caption><p>Standalone figure caption mentioning Xist.</p></caption>
+    </fig>
+  </body>
+</article>"#;
+        let article = parse(xml).expect("parse");
+
+        let results: Vec<&Section> = article
+            .sections_of_kind(SectionKind::Results)
+            .collect();
+        assert_eq!(results.len(), 1);
+        assert!(results[0].text.contains("Body text mentions Airn"));
+        assert!(
+            !results[0].text.contains("Dotted line"),
+            "figure caption text must not leak into parent section"
+        );
+
+        let figs: Vec<&Section> = article
+            .sections_of_kind(SectionKind::Figure)
+            .collect();
+        assert_eq!(figs.len(), 2);
+        assert!(figs[0].text.contains("Dotted line: TSS of Airn"));
+        assert_eq!(figs[0].title.as_deref(), Some("Figure 1: Airn locus"));
+        assert!(figs[1].text.contains("Xist"));
+        assert_eq!(figs[1].title.as_deref(), Some("Figure 2"));
+    }
+
+    #[test]
+    fn tables_are_extracted_separately() {
+        let xml = r#"<?xml version="1.0"?>
+<article>
+  <body>
+    <sec sec-type="results"><title>Results</title>
+      <p>Body text mentions Airn.</p>
+      <table-wrap id="t1">
+        <label>Table 1</label>
+        <caption><title>Primers</title><p>Primer set used to amplify Airn.</p></caption>
+        <table><tr><td>x</td></tr></table>
+        <table-wrap-foot><p>Footnote mentioning Kcnq1ot1.</p></table-wrap-foot>
+      </table-wrap>
+    </sec>
+    <table-wrap id="t2">
+      <label>Table 2</label>
+      <caption><p>Standalone table caption mentioning Xist.</p></caption>
+    </table-wrap>
+  </body>
+</article>"#;
+        let article = parse(xml).expect("parse");
+
+        let results: Vec<&Section> = article
+            .sections_of_kind(SectionKind::Results)
+            .collect();
+        assert_eq!(results.len(), 1);
+        assert!(results[0].text.contains("Body text mentions Airn"));
+        assert!(
+            !results[0].text.contains("Primer set"),
+            "table caption text must not leak into parent section"
+        );
+        assert!(
+            !results[0].text.contains("Footnote"),
+            "table footnote text must not leak into parent section"
+        );
+
+        let tabs: Vec<&Section> = article
+            .sections_of_kind(SectionKind::Table)
+            .collect();
+        assert_eq!(tabs.len(), 2);
+        assert!(tabs[0].text.contains("Primer set used to amplify Airn"));
+        assert!(tabs[0].text.contains("Footnote mentioning Kcnq1ot1"));
+        assert_eq!(tabs[0].title.as_deref(), Some("Table 1: Primers"));
+        assert!(tabs[1].text.contains("Xist"));
+        assert_eq!(tabs[1].title.as_deref(), Some("Table 2"));
     }
 }
