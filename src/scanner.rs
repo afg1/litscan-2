@@ -1,4 +1,5 @@
 use aho_corasick::{AhoCorasickBuilder, AhoCorasick, AhoCorasickKind, MatchKind, PatternID, BuildError};
+use unicode_segmentation::UnicodeSegmentation;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::io::{self, BufRead};
@@ -7,6 +8,8 @@ use thiserror::Error;
 
 use pyo3::prelude::*;
 use pyo3::exceptions::PyRuntimeError;
+
+use crate::jats::JatsArticle;
 
 #[derive(Debug, Error)]
 pub enum Error {
@@ -41,6 +44,22 @@ pub struct PatternMetadata {
     pub urs_table: Vec<String>,
     #[pyo3(get)]
     pub n_patterns: u32,
+}
+
+#[pyclass]
+#[derive(Debug)]
+pub struct Hit {
+    #[pyo3(get)]
+    pub urs_taxid: String,
+    #[pyo3(get)]
+    pub section: String,
+    #[pyo3(get)]
+    pub symbol: String,
+    #[pyo3(get)]
+    pub sentence: String,
+    #[pyo3(get)]
+    pub offset: u32
+
 }
 
 
@@ -114,4 +133,66 @@ pub fn build_search_automaton(id_list: PathBuf) -> Result<PatternIndex, Error>  
     )
 
 
+}
+
+#[inline]
+fn is_word_boundary_match(haystack: &str, start: usize, end: usize) -> bool {
+    let bytes = haystack.as_bytes();
+    let left_ok  = start == 0 || !bytes[start - 1].is_ascii_alphanumeric();
+    let right_ok = end == bytes.len() || !bytes[end].is_ascii_alphanumeric();
+    left_ok && right_ok
+}
+
+fn segment_text(text: &str) -> Vec<(usize, usize)> {
+    text.split_sentence_bound_indices()
+    .map(|(start, word)| (start, start+word.len()))
+    .collect()
+}
+
+pub fn search_article(searcher: &PatternIndex, article: &JatsArticle) -> Result<Vec<Hit>, Error> {
+    
+    let mut hits = vec![];
+    for section in &article.sections {
+        let haystack= &section.text;
+        let sentence_bounds = segment_text(&haystack);
+        for mat in searcher.automaton.find_iter(haystack) {
+            if !is_word_boundary_match(haystack, mat.start(), mat.end()) {
+                continue;
+            }
+
+            let hit_sentence_bounds_idx = sentence_bounds.binary_search_by(|&(sent_start, sent_end)| {
+            if mat.start() >= sent_start && mat.start() < sent_end {
+                std::cmp::Ordering::Equal
+            } else if mat.start() < sent_start {
+                std::cmp::Ordering::Greater
+            } else {
+                std::cmp::Ordering::Less
+            }
+            });
+            let mut sentence: String = "".to_string();
+            if let Ok(idx) = hit_sentence_bounds_idx {
+                let (start, end) = sentence_bounds[idx];
+                if mat.end() <= end {
+                    sentence = haystack[start..end].to_string();
+                }
+            }
+
+
+            let symbol = &haystack[mat.start()..mat.end()];
+            let pid = mat.pattern().as_usize();
+            let urs_range = searcher.metadata.urs_offsets[pid] as usize
+                            .. searcher.metadata.urs_offsets[pid + 1] as usize;
+                for &idx in &searcher.metadata.urs_indices[urs_range] {
+                    hits.push(Hit {
+                        urs_taxid: searcher.metadata.urs_table[idx as usize].clone(),
+                        symbol: symbol.to_string(),
+                        section: section.kind.as_str().to_string(),
+                        sentence: sentence.clone(),
+                        offset: mat.start() as u32,
+                    });
+                }
+            }
+    }
+
+    Ok(hits)
 }
