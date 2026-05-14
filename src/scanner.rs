@@ -1,4 +1,4 @@
-use aho_corasick::{AhoCorasickBuilder, AhoCorasick, AhoCorasickKind, MatchKind, PatternID, BuildError};
+use aho_corasick::{AhoCorasickBuilder, AhoCorasick, AhoCorasickKind, MatchKind, BuildError};
 use unicode_segmentation::UnicodeSegmentation;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -14,7 +14,7 @@ use pyo3::prelude::*;
 use pyo3::exceptions::PyRuntimeError;
 
 use crate::jats::JatsArticle;
-
+use crate::classifier::TfidfClassifier;
 #[derive(Debug, Error)]
 pub enum Error {
     #[error("I/O error: {0}")]
@@ -163,8 +163,8 @@ fn segment_text(text: &str) -> Vec<(usize, usize)> {
     .collect()
 }
 
+/// Search a single article with the compiled automaton, returns a Vec of Hit objects to parse
 pub fn search_article(searcher: &PatternIndex, article: &JatsArticle) -> Result<Vec<Hit>, Error> {
-    
     let mut hits = vec![];
     for section in &article.sections {
         let mut seen_sentences: HashMap<&str, HashSet<&str> > = HashMap::new();
@@ -226,7 +226,17 @@ pub fn search_article_to_batch(
     article: &JatsArticle,
     pmcid: &str,
     schema: &Arc<Schema>,
+    filter: &Option<&TfidfClassifier>
 ) -> Result<Option<RecordBatch>, Error> {
+
+    // Filter based on abstract classification, if the model is passed
+    if let Some(classifier) = filter {
+        let abstract_text = article.abstract_text.as_deref().unwrap_or("");
+        if !abstract_text.is_empty() && classifier.classify(abstract_text).label == 0u32 {
+                return Ok(None);
+        }
+    }
+
     let mut pmcid_b: StringDictionaryBuilder<UInt32Type> = StringDictionaryBuilder::new();
     let mut urs_b: StringDictionaryBuilder<UInt32Type> = StringDictionaryBuilder::new();
     let mut section_b: StringDictionaryBuilder<UInt32Type> = StringDictionaryBuilder::new();

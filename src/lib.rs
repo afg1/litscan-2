@@ -53,6 +53,7 @@ fn scan_shard(
     searcher: &scanner::PatternIndex,
     shard_path: String,
     output_path: String,
+    filter_model: Option<&classifier::TfidfClassifier>
 ) -> PyResult<u64> {
     let path = Path::new(&shard_path);
     let mut file = std::fs::File::open(path)
@@ -92,7 +93,10 @@ fn scan_shard(
         .par_iter()
         .try_for_each_with(tx.clone(), |tx, (pmcid, node)| {
             let article = jats::parse_article_node(*node);
-            let maybe_batch = scanner::search_article_to_batch(searcher, &article, pmcid, &schema)?;
+
+            
+
+            let maybe_batch = scanner::search_article_to_batch(searcher, &article, pmcid, &schema, &filter_model)?;
             // Drop the article (and its cloned-out section text) before blocking on send.
             drop(article);
             if let Some(batch) = maybe_batch {
