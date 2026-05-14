@@ -221,19 +221,24 @@ pub fn search_article(searcher: &PatternIndex, article: &JatsArticle) -> Result<
 /// completed `RecordBatch` (or `None` if there were no hits). Avoids the
 /// per-urs `Vec<Hit>` allocation that duplicates `sentence` / `symbol` /
 /// `urs_taxid` across the fanout.
+pub enum ScanOutcome {
+    Filtered,
+    Scanned(Option<RecordBatch>),
+}
+
 pub fn search_article_to_batch(
     searcher: &PatternIndex,
     article: &JatsArticle,
     pmcid: &str,
     schema: &Arc<Schema>,
     filter: &Option<&TfidfClassifier>
-) -> Result<Option<RecordBatch>, Error> {
+) -> Result<ScanOutcome, Error> {
 
     // Filter based on abstract classification, if the model is passed
     if let Some(classifier) = filter {
         let abstract_text = article.abstract_text.as_deref().unwrap_or("");
         if !abstract_text.is_empty() && classifier.classify(abstract_text).label == 0u32 {
-                return Ok(None);
+                return Ok(ScanOutcome::Filtered);
         }
     }
 
@@ -299,7 +304,7 @@ pub fn search_article_to_batch(
     }
 
     if n_rows == 0 {
-        return Ok(None);
+        return Ok(ScanOutcome::Scanned(None));
     }
 
     let arrays: Vec<ArrayRef> = vec![
@@ -312,5 +317,5 @@ pub fn search_article_to_batch(
     ];
 
     let batch = RecordBatch::try_new(schema.clone(), arrays)?;
-    Ok(Some(batch))
+    Ok(ScanOutcome::Scanned(Some(batch)))
 }

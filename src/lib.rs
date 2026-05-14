@@ -1,6 +1,7 @@
 use pyo3::prelude::*;
 use std::{io::Read, path::PathBuf, path::Path};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::sync_channel;
 use std::thread;
 use std::fs::File;
@@ -54,7 +55,7 @@ fn scan_shard(
     shard_path: String,
     output_path: String,
     filter_model: Option<&classifier::TfidfClassifier>
-) -> PyResult<u64> {
+) -> PyResult<(u64, u64, u64, u64)> {
     let path = Path::new(&shard_path);
     let mut file = std::fs::File::open(path)
         .map_err(|e| pyo3::exceptions::PyIOError::new_err(format!("failed to open {}: {}", path.display(), e)))?;
@@ -64,6 +65,9 @@ fn scan_shard(
     let shard_doc = jats::parse_document(&xml_string)
         .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("failed to parse {}: {}", path.display(), e)))?;
     let article_nodes: Vec<_> = jats::article_nodes(&shard_doc).collect();
+    let articles_total = article_nodes.len() as u64;
+    let articles_scanned = Arc::new(AtomicU64::new(0));
+    let articles_filtered = Arc::new(AtomicU64::new(0));
 
     let schema = hits_schema();
 
@@ -94,15 +98,21 @@ fn scan_shard(
         .try_for_each_with(tx.clone(), |tx, (pmcid, node)| {
             let article = jats::parse_article_node(*node);
 
-            
-
-            let maybe_batch = scanner::search_article_to_batch(searcher, &article, pmcid, &schema, &filter_model)?;
+            let outcome = scanner::search_article_to_batch(searcher, &article, pmcid, &schema, &filter_model)?;
             // Drop the article (and its cloned-out section text) before blocking on send.
             drop(article);
-            if let Some(batch) = maybe_batch {
-                tx.send(batch).map_err(|e| {
-                    pyo3::exceptions::PyRuntimeError::new_err(format!("writer thread died: {}", e))
-                })?;
+            match outcome {
+                scanner::ScanOutcome::Filtered => {
+                    articles_filtered.fetch_add(1, Ordering::Relaxed);
+                }
+                scanner::ScanOutcome::Scanned(maybe_batch) => {
+                    articles_scanned.fetch_add(1, Ordering::Relaxed);
+                    if let Some(batch) = maybe_batch {
+                        tx.send(batch).map_err(|e| {
+                            pyo3::exceptions::PyRuntimeError::new_err(format!("writer thread died: {}", e))
+                        })?;
+                    }
+                }
             }
             Ok(())
         });
@@ -117,14 +127,19 @@ fn scan_shard(
     let total = writer_result
         .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("parquet write failed: {}", e)))?;
 
-    Ok(total)
+    Ok((
+        articles_total,
+        articles_scanned.load(Ordering::Relaxed),
+        articles_filtered.load(Ordering::Relaxed),
+        total,
+    ))
 }
 
 
 
 /// A Python module implemented in Rust.
 #[pymodule]
-fn litscan_2(m: &Bound<'_, PyModule>) -> PyResult<()> {
+fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(build_scanner, m)?)?;
     m.add_function(wrap_pyfunction!(scan_one, m)?)?;
     m.add_function(wrap_pyfunction!(scan_shard, m)?)?;
