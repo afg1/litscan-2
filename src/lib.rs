@@ -124,5 +124,8 @@ fn litscan_2(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(build_scanner, m)?)?;
     m.add_function(wrap_pyfunction!(scan_one, m)?)?;
     m.add_function(wrap_pyfunction!(scan_shard, m)?)?;
+
+    m.add_class::<classifier::TfidfClassifier>()?;
+    m.add_class::<classifier::ClassificationResult>()?;
     Ok(())
 }

@@ -4,6 +4,7 @@ use serde::Deserialize;
 use std::collections::HashMap;
 use thiserror::Error;
 use std::path::PathBuf;
+use pyo3::{prelude::*, exceptions::PyRuntimeError};
 
 #[derive(Debug, Error)]
 pub enum Error {
@@ -175,6 +176,7 @@ impl Vectorizer {
     }
 }
 
+#[pyclass]
 pub struct TfidfClassifier {
     tokenizer: Tokenizer,
     vectorizer: Vectorizer,
@@ -186,12 +188,12 @@ pub struct TfidfClassifier {
     features: u32
 
 }
-
+#[pyclass]
 pub struct ClassificationResult {
-    pub proba: Vec<f64>,
-    pub fold_decisions: Vec<f64>,
-    pub fold_prob: Vec<f64>,
-    pub label: u32
+    #[pyo3(get)] pub proba: Vec<f64>,
+    #[pyo3(get)] pub fold_decisions: Vec<f64>,
+    #[pyo3(get)] pub fold_prob: Vec<f64>,
+    #[pyo3(get)] pub label: u32
 }
 
 impl TfidfClassifier {
@@ -248,3 +250,15 @@ impl TfidfClassifier {
         }
     }
 }
+
+#[pymethods]
+impl TfidfClassifier {
+    #[new]
+    fn py_new(safetensors_path: PathBuf, metadata_path: PathBuf) -> PyResult<Self> {
+        Self::new(safetensors_path, metadata_path).map_err(|e| PyRuntimeError::new_err(e.to_string()))
+    }   
+    
+    fn py_classify(&self, text: &str) -> ClassificationResult {
+        TfidfClassifier::classify(self, text)
+    }   
+} 
