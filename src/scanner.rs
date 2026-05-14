@@ -4,7 +4,11 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::io::{self, BufRead};
 use std::fs::File;
+use std::sync::Arc;
 use thiserror::Error;
+
+use arrow::array::{ArrayRef, RecordBatch, StringDictionaryBuilder, UInt32Builder};
+use arrow::datatypes::{Schema, UInt32Type};
 
 use pyo3::prelude::*;
 use pyo3::exceptions::PyRuntimeError;
@@ -20,7 +24,10 @@ pub enum Error {
     Json(#[from] serde_json::Error),
 
     #[error("failed to build AC automaton: {0}")]
-    BuildError(#[from] BuildError)
+    BuildError(#[from] BuildError),
+
+    #[error("arrow error: {0}")]
+    Arrow(#[from] arrow::error::ArrowError),
 }
 
 impl From<Error> for PyErr {
@@ -107,7 +114,14 @@ pub fn build_search_automaton(id_list: PathBuf) -> Result<PatternIndex, Error>  
 
     let mut pattern_strings: Vec<String> = Vec::with_capacity(pattern_to_urs.len());
 
-    for (pattern, mut urs_list) in pattern_to_urs {
+    // Drain into a Vec and sort by pattern string so PatternIDs are stable across
+    // runs. HashMap iteration order is randomized, and with LeftmostLongest the
+    // tiebreak between equal-length patterns is PatternID — so a non-deterministic
+    // ordering produces non-deterministic hit counts.
+    let mut pattern_entries: Vec<(String, Vec<u32>)> = pattern_to_urs.into_iter().collect();
+    pattern_entries.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+
+    for (pattern, mut urs_list) in pattern_entries {
         urs_list.sort_unstable();
         urs_list.dedup();
         urs_indices.extend_from_slice(&urs_list);
@@ -117,7 +131,7 @@ pub fn build_search_automaton(id_list: PathBuf) -> Result<PatternIndex, Error>  
     let automaton = AhoCorasickBuilder::new()
     .match_kind(MatchKind::LeftmostLongest)
     .ascii_case_insensitive(true)
-    .kind(Some(AhoCorasickKind::DFA))
+    .kind(Some(AhoCorasickKind::ContiguousNFA))
     .build(&pattern_strings)?;
 
     Ok(
@@ -153,7 +167,7 @@ pub fn search_article(searcher: &PatternIndex, article: &JatsArticle) -> Result<
     
     let mut hits = vec![];
     for section in &article.sections {
-        let mut seen_sentences: HashMap<&str, HashSet<String> > = HashMap::new();
+        let mut seen_sentences: HashMap<&str, HashSet<&str> > = HashMap::new();
         let haystack= &section.text;
         let sentence_bounds = segment_text(&haystack);
         for mat in searcher.automaton.find_iter(haystack) {
@@ -170,20 +184,17 @@ pub fn search_article(searcher: &PatternIndex, article: &JatsArticle) -> Result<
                 std::cmp::Ordering::Less
             }
             });
-            let mut sentence: String = "".to_string();
+            let mut sentence: &str = "";
             if let Ok(idx) = hit_sentence_bounds_idx {
                 let (start, end) = sentence_bounds[idx];
                 if mat.end() <= end {
-                    sentence = haystack[start..end].to_string();
+                    sentence = &haystack[start..end];
                 }
             }
             let symbol = &haystack[mat.start()..mat.end()];
             // only insert any given sentence once
-            if !seen_sentences.entry(&symbol).or_default().contains(&sentence){
-                seen_sentences.entry(&symbol).and_modify(|s| { s.insert(sentence.clone());} );
-            }
-            else {
-                continue
+            if !seen_sentences.entry(symbol).or_default().insert(sentence) {
+                continue;
             }
 
 
@@ -196,7 +207,7 @@ pub fn search_article(searcher: &PatternIndex, article: &JatsArticle) -> Result<
                         urs_taxid: searcher.metadata.urs_table[idx as usize].clone(),
                         symbol: symbol.to_string(),
                         section: section.kind.as_str().to_string(),
-                        sentence: sentence.clone(),
+                        sentence: sentence.to_string(),
                         offset: mat.start() as u32,
                     });
                 }
@@ -204,4 +215,92 @@ pub fn search_article(searcher: &PatternIndex, article: &JatsArticle) -> Result<
     }
 
     Ok(hits)
+}
+
+/// Scan an article and append rows directly into Arrow builders, returning a
+/// completed `RecordBatch` (or `None` if there were no hits). Avoids the
+/// per-urs `Vec<Hit>` allocation that duplicates `sentence` / `symbol` /
+/// `urs_taxid` across the fanout.
+pub fn search_article_to_batch(
+    searcher: &PatternIndex,
+    article: &JatsArticle,
+    pmcid: &str,
+    schema: &Arc<Schema>,
+) -> Result<Option<RecordBatch>, Error> {
+    let mut pmcid_b: StringDictionaryBuilder<UInt32Type> = StringDictionaryBuilder::new();
+    let mut urs_b: StringDictionaryBuilder<UInt32Type> = StringDictionaryBuilder::new();
+    let mut section_b: StringDictionaryBuilder<UInt32Type> = StringDictionaryBuilder::new();
+    let mut symbol_b: StringDictionaryBuilder<UInt32Type> = StringDictionaryBuilder::new();
+    let mut sentence_b: StringDictionaryBuilder<UInt32Type> = StringDictionaryBuilder::new();
+    let mut offset_b = UInt32Builder::new();
+
+    let mut n_rows: usize = 0;
+
+    for section in &article.sections {
+        let mut seen_sentences: HashMap<&str, HashSet<&str>> = HashMap::new();
+        let haystack = &section.text;
+        let sentence_bounds = segment_text(haystack);
+        let section_str = section.kind.as_str();
+
+        for mat in searcher.automaton.find_iter(haystack) {
+            if !is_word_boundary_match(haystack, mat.start(), mat.end()) {
+                continue;
+            }
+
+            let hit_sentence_bounds_idx = sentence_bounds.binary_search_by(|&(sent_start, sent_end)| {
+                if mat.start() >= sent_start && mat.start() < sent_end {
+                    std::cmp::Ordering::Equal
+                } else if mat.start() < sent_start {
+                    std::cmp::Ordering::Greater
+                } else {
+                    std::cmp::Ordering::Less
+                }
+            });
+
+            let mut sentence: &str = "";
+            if let Ok(idx) = hit_sentence_bounds_idx {
+                let (start, end) = sentence_bounds[idx];
+                if mat.end() <= end {
+                    sentence = &haystack[start..end];
+                }
+            }
+            let symbol: &str = &haystack[mat.start()..mat.end()];
+
+            // Dedup: same (symbol, sentence) within a section only fires once.
+            if !seen_sentences.entry(symbol).or_default().insert(sentence) {
+                continue;
+            }
+
+            let pid = mat.pattern().as_usize();
+            let urs_range = searcher.metadata.urs_offsets[pid] as usize
+                .. searcher.metadata.urs_offsets[pid + 1] as usize;
+            let offset = mat.start() as u32;
+
+            for &idx in &searcher.metadata.urs_indices[urs_range] {
+                pmcid_b.append_value(pmcid);
+                urs_b.append_value(&searcher.metadata.urs_table[idx as usize]);
+                section_b.append_value(section_str);
+                symbol_b.append_value(symbol);
+                sentence_b.append_value(sentence);
+                offset_b.append_value(offset);
+                n_rows += 1;
+            }
+        }
+    }
+
+    if n_rows == 0 {
+        return Ok(None);
+    }
+
+    let arrays: Vec<ArrayRef> = vec![
+        Arc::new(pmcid_b.finish()),
+        Arc::new(urs_b.finish()),
+        Arc::new(section_b.finish()),
+        Arc::new(symbol_b.finish()),
+        Arc::new(sentence_b.finish()),
+        Arc::new(offset_b.finish()),
+    ];
+
+    let batch = RecordBatch::try_new(schema.clone(), arrays)?;
+    Ok(Some(batch))
 }
