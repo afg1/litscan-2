@@ -10,6 +10,8 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 aho-corasick = "1.1.4"
+arrow = "54"
+parquet = "54"
 pyo3 = "0.24.0"
 rayon = "1.12.0"
 regex = "1.12.3"
@@ -19,3 +21,4 @@ serde = "1.0.228"
 serde_json = "1.0.149"
 strsim = "0.11.1"
 thiserror = "2.0.18"
+unicode-segmentation = "1.13.2"
