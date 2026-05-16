@@ -1,10 +1,11 @@
 use pyo3::prelude::*;
-use std::{io::Read, path::PathBuf, path::Path};
+use std::{io::{self, BufRead, BufReader, Read}, path::PathBuf, path::Path};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::sync_channel;
 use std::thread;
 use std::fs::File;
+use flate2::read::GzDecoder;
 use rayon::prelude::*;
 
 use arrow::array::RecordBatch;
@@ -16,6 +17,24 @@ use parquet::file::properties::WriterProperties;
 pub mod classifier;
 pub mod jats;
 pub mod scanner;
+
+/// Read a shard into a String, transparently gunzipping if the file
+/// starts with the gzip magic bytes (0x1f 0x8b).
+fn read_shard_to_string(path: &Path) -> io::Result<String> {
+    let file = File::open(path)?;
+    let mut reader = BufReader::new(file);
+    let is_gzip = {
+        let buf = reader.fill_buf()?;
+        buf.len() >= 2 && buf[0] == 0x1f && buf[1] == 0x8b
+    };
+    let mut s = String::new();
+    if is_gzip {
+        GzDecoder::new(reader).read_to_string(&mut s)?;
+    } else {
+        reader.read_to_string(&mut s)?;
+    }
+    Ok(s)
+}
 
 /// Formats the sum of two numbers as string.
 #[pyfunction]
@@ -57,10 +76,7 @@ fn scan_shard(
     filter_model: Option<&classifier::TfidfClassifier>
 ) -> PyResult<(u64, u64, u64, u64)> {
     let path = Path::new(&shard_path);
-    let mut file = std::fs::File::open(path)
-        .map_err(|e| pyo3::exceptions::PyIOError::new_err(format!("failed to open {}: {}", path.display(), e)))?;
-    let mut xml_string = String::new();
-    file.read_to_string(&mut xml_string)
+    let xml_string = read_shard_to_string(path)
         .map_err(|e| pyo3::exceptions::PyIOError::new_err(format!("failed to read {}: {}", path.display(), e)))?;
     let shard_doc = jats::parse_document(&xml_string)
         .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("failed to parse {}: {}", path.display(), e)))?;
