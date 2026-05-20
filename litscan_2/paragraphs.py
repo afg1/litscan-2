@@ -20,6 +20,7 @@ from collections import defaultdict
 from pathlib import Path
 
 import polars as pl
+from tqdm import tqdm
 
 from . import _core
 
@@ -53,7 +54,7 @@ def extract_paragraphs(hits_parquet, shards, output_path):
     result_files: list[str] = []
     total_rows = 0
     try:
-        for shard_path in shard_list:
+        for shard_path in tqdm(shard_list):
             fd, tmp = tempfile.mkstemp(suffix=".parquet")
             os.close(fd)
             rows = _core.extract_paragraphs_for_shard(shard_path, dict(by_pmcid), tmp)

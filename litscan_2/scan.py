@@ -7,6 +7,7 @@ import tempfile
 from pathlib import Path
 
 import polars as pl
+from tqdm import tqdm
 
 from . import _core
 
@@ -35,7 +36,7 @@ def scan_shards(scanner, shards, output_path, filter_model=None):
     total_filtered = 0
     total_hits = 0
     try:
-        for shard_path in shard_list:
+        for shard_path in tqdm(shard_list):
             fd, tmp = tempfile.mkstemp(suffix=".parquet")
             os.close(fd)
             tot_art, scanned_art, filt_art, hits = _core.scan_shard(
