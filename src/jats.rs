@@ -137,12 +137,49 @@ pub struct Section {
     pub title: Option<String>,
     pub text: String,
     pub kind: SectionKind,
+    /// Byte spans `(start, end)` within `text` for each non-empty `<p>` that
+    /// was concatenated to build it. Used by the paragraph-extraction path to
+    /// map a hit `offset` back to its containing paragraph. Empty when the
+    /// section wasn't built from per-paragraph concatenation (e.g. the
+    /// flattened Abstract).
+    pub paragraphs: Vec<(usize, usize)>,
 }
 
 impl Section {
     fn new(title: Option<String>, text: String, kind: SectionKind) -> Self {
-        Section { title, text, kind }
+        let paragraphs = if text.is_empty() { Vec::new() } else { vec![(0, text.len())] };
+        Section { title, text, kind, paragraphs }
     }
+}
+
+/// Concatenate a stream of `<p>` nodes the same way the parser does (each
+/// paragraph's `collect_text` output, separated by '\n', final string
+/// trimmed) and also return byte spans into the returned text for each
+/// non-empty paragraph.
+///
+/// `collect_text` already trims leading whitespace per paragraph, so the
+/// concatenated string never starts with whitespace; `trim_end` is therefore
+/// equivalent to `text.trim()` here, and the recorded paragraph spans stay
+/// valid against the returned (trimmed) text.
+fn build_paragraph_text<'a, 'input: 'a, I>(p_nodes: I) -> (String, Vec<(usize, usize)>)
+where
+    I: IntoIterator<Item = roxmltree::Node<'a, 'input>>,
+{
+    let mut text = String::new();
+    let mut spans: Vec<(usize, usize)> = Vec::new();
+    for p_node in p_nodes {
+        if let Some(t) = collect_text(p_node) {
+            let start = text.len();
+            text.push_str(&t);
+            let end = text.len();
+            spans.push((start, end));
+            text.push('\n');
+        }
+    }
+    let trimmed_len = text.trim_end().len();
+    text.truncate(trimmed_len);
+    spans.retain(|&(s, _)| s < trimmed_len);
+    (text, spans)
 }
 
 pub struct JatsArticle {
@@ -294,20 +331,15 @@ pub fn parse_article_node(article_node: roxmltree::Node) -> JatsArticle {
                 .and_then(|n| collect_text(n));
             let sec_type = sec_node.attribute("sec-type");
             let kind = SectionKind::classify(sec_type, title.as_deref());
-            let mut text = String::new();
-            for p_node in sec_node.descendants().filter(|n| {
+            let (text, paragraphs) = build_paragraph_text(sec_node.descendants().filter(|n| {
                 n.has_tag_name("p")
                     && !n.ancestors().any(|a| a.has_tag_name("fig") || a.has_tag_name("table-wrap"))
-            }) {
-                if let Some(t) = collect_text(p_node) {
-                    text.push_str(&t);
-                    text.push('\n');
-                }
-            }
+            }));
             article.sections.push(Section {
                 title,
-                text: text.trim().to_string(),
+                text,
                 kind,
+                paragraphs,
             });
         }
 
@@ -326,21 +358,17 @@ pub fn parse_article_node(article_node: roxmltree::Node) -> JatsArticle {
                 (None, Some(t)) => Some(t),
                 (None, None) => None,
             };
-            let mut text = String::new();
-            if let Some(caption) = caption_node {
-                for p_node in caption.descendants().filter(|n| n.has_tag_name("p")) {
-                    if let Some(t) = collect_text(p_node) {
-                        text.push_str(&t);
-                        text.push('\n');
-                    }
-                }
-            }
-            let text = text.trim().to_string();
+            let (text, paragraphs) = if let Some(caption) = caption_node {
+                build_paragraph_text(caption.descendants().filter(|n| n.has_tag_name("p")))
+            } else {
+                (String::new(), Vec::new())
+            };
             if title.is_some() || !text.is_empty() {
                 article.sections.push(Section {
                     title,
                     text,
                     kind: SectionKind::Figure,
+                    paragraphs,
                 });
             }
         }
@@ -360,29 +388,20 @@ pub fn parse_article_node(article_node: roxmltree::Node) -> JatsArticle {
                 (None, Some(t)) => Some(t),
                 (None, None) => None,
             };
-            let mut text = String::new();
-            if let Some(caption) = caption_node {
-                for p_node in caption.descendants().filter(|n| n.has_tag_name("p")) {
-                    if let Some(t) = collect_text(p_node) {
-                        text.push_str(&t);
-                        text.push('\n');
-                    }
-                }
-            }
-            for foot_node in tw_node.children().filter(|n| n.has_tag_name("table-wrap-foot")) {
-                for p_node in foot_node.descendants().filter(|n| n.has_tag_name("p")) {
-                    if let Some(t) = collect_text(p_node) {
-                        text.push_str(&t);
-                        text.push('\n');
-                    }
-                }
-            }
-            let text = text.trim().to_string();
+            let caption_ps = caption_node
+                .into_iter()
+                .flat_map(|c| c.descendants().filter(|n| n.has_tag_name("p")));
+            let foot_ps = tw_node
+                .children()
+                .filter(|n| n.has_tag_name("table-wrap-foot"))
+                .flat_map(|f| f.descendants().filter(|n| n.has_tag_name("p")));
+            let (text, paragraphs) = build_paragraph_text(caption_ps.chain(foot_ps));
             if title.is_some() || !text.is_empty() {
                 article.sections.push(Section {
                     title,
                     text,
                     kind: SectionKind::Table,
+                    paragraphs,
                 });
             }
         }

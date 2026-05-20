@@ -8,14 +8,17 @@ use std::fs::File;
 use flate2::read::GzDecoder;
 use rayon::prelude::*;
 
-use arrow::array::RecordBatch;
-use arrow::datatypes::{DataType, Field, Schema};
+use std::collections::HashMap;
+
+use arrow::array::{ArrayRef, RecordBatch, StringArray, StringDictionaryBuilder, UInt32Builder};
+use arrow::datatypes::{DataType, Field, Schema, UInt32Type};
 use parquet::arrow::ArrowWriter;
 use parquet::basic::{Compression, ZstdLevel};
 use parquet::file::properties::WriterProperties;
 
 pub mod classifier;
 pub mod jats;
+pub mod paragraphs;
 pub mod scanner;
 
 /// Read a shard into a String, transparently gunzipping if the file
@@ -153,12 +156,98 @@ fn scan_shard(
 
 
 
+fn paragraphs_schema() -> Arc<Schema> {
+    Arc::new(Schema::new(vec![
+        Field::new_dictionary("pmcid", DataType::UInt32, DataType::Utf8, false),
+        Field::new_dictionary("section", DataType::UInt32, DataType::Utf8, false),
+        Field::new("offset", DataType::UInt32, false),
+        Field::new_dictionary("sentence", DataType::UInt32, DataType::Utf8, false),
+        Field::new("paragraph", DataType::Utf8, false),
+    ]))
+}
+
+/// Extract paragraphs for every `(section, offset)` request in
+/// `requests_by_pmcid` whose PMCID is present in `shard_path`. Writes a
+/// parquet file with columns `(pmcid, section, offset, paragraph)` that can
+/// be inner-joined onto the hits parquet by `(pmcid, section, offset)`.
+///
+/// Returns the number of paragraph rows written.
+#[pyfunction]
+fn extract_paragraphs_for_shard(
+    shard_path: String,
+    requests_by_pmcid: HashMap<String, Vec<(String, u32, String)>>,
+    output_path: String,
+) -> PyResult<u64> {
+    let path = Path::new(&shard_path);
+    let xml_string = read_shard_to_string(path)
+        .map_err(|e| pyo3::exceptions::PyIOError::new_err(format!("failed to read {}: {}", path.display(), e)))?;
+    let shard_doc = jats::parse_document(&xml_string)
+        .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("failed to parse {}: {}", path.display(), e)))?;
+
+    let schema = paragraphs_schema();
+    let out_path = PathBuf::from(&output_path);
+    let out_file = File::create(&out_path)
+        .map_err(|e| pyo3::exceptions::PyIOError::new_err(format!("failed to create {}: {}", out_path.display(), e)))?;
+    let props = WriterProperties::builder()
+        .set_compression(Compression::ZSTD(ZstdLevel::try_new(3).unwrap()))
+        .build();
+    let mut writer = ArrowWriter::try_new(out_file, schema.clone(), Some(props))
+        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("parquet writer init failed: {}", e)))?;
+
+    let mut pmcid_b: StringDictionaryBuilder<UInt32Type> = StringDictionaryBuilder::new();
+    let mut section_b: StringDictionaryBuilder<UInt32Type> = StringDictionaryBuilder::new();
+    let mut offset_b = UInt32Builder::new();
+    let mut sentence_b: StringDictionaryBuilder<UInt32Type> = StringDictionaryBuilder::new();
+    let mut paragraph_b: Vec<String> = Vec::new();
+
+    let mut n_rows: u64 = 0;
+
+    for (pmcid, node) in jats::article_nodes(&shard_doc) {
+        let Some(reqs) = requests_by_pmcid.get(&pmcid) else { continue };
+        let typed: Vec<paragraphs::Request> = reqs
+            .iter()
+            .map(|(section, offset, sentence)| paragraphs::Request {
+                section: section.clone(),
+                offset: *offset,
+                sentence: sentence.clone(),
+            })
+            .collect();
+        for resolved in paragraphs::extract_paragraphs_for_article(node, &typed) {
+            pmcid_b.append_value(&pmcid);
+            section_b.append_value(&resolved.section);
+            offset_b.append_value(resolved.offset);
+            sentence_b.append_value(&resolved.sentence);
+            paragraph_b.push(resolved.paragraph);
+            n_rows += 1;
+        }
+    }
+
+    if n_rows > 0 {
+        let arrays: Vec<ArrayRef> = vec![
+            Arc::new(pmcid_b.finish()),
+            Arc::new(section_b.finish()),
+            Arc::new(offset_b.finish()),
+            Arc::new(sentence_b.finish()),
+            Arc::new(StringArray::from(paragraph_b)),
+        ];
+        let batch = RecordBatch::try_new(schema.clone(), arrays)
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("batch build failed: {}", e)))?;
+        writer.write(&batch)
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("parquet write failed: {}", e)))?;
+    }
+    writer.close()
+        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("parquet close failed: {}", e)))?;
+
+    Ok(n_rows)
+}
+
 /// A Python module implemented in Rust.
 #[pymodule]
 fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(build_scanner, m)?)?;
     m.add_function(wrap_pyfunction!(scan_one, m)?)?;
     m.add_function(wrap_pyfunction!(scan_shard, m)?)?;
+    m.add_function(wrap_pyfunction!(extract_paragraphs_for_shard, m)?)?;
 
     m.add_class::<classifier::TfidfClassifier>()?;
     m.add_class::<classifier::ClassificationResult>()?;
