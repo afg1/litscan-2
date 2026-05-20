@@ -178,7 +178,7 @@ fn scan_shard(
 }
 
 #[pyfunction]
-#[pyo3(signature = (searcher, shard_paths, output_paths, filter_model=None, n_decompress=None))]
+#[pyo3(signature = (searcher, shard_paths, output_paths, filter_model=None, n_decompress=None, progress_callback=None))]
 fn scan_shards(
     py: Python<'_>,
     searcher: &scanner::PatternIndex,
@@ -186,6 +186,7 @@ fn scan_shards(
     output_paths: Vec<String>,
     filter_model: Option<&classifier::TfidfClassifier>,
     n_decompress: Option<usize>,
+    progress_callback: Option<PyObject>,
 ) -> PyResult<(u64, u64, u64, u64)> {
     if shard_paths.len() != output_paths.len() {
         return Err(pyo3::exceptions::PyValueError::new_err(format!(
@@ -220,6 +221,8 @@ fn scan_shards(
     let total_filtered = AtomicU64::new(0);
     let total_hits = AtomicU64::new(0);
 
+    let callback = progress_callback.as_ref();
+
     let result: PyResult<()> = py.allow_threads(|| {
         thread::scope(|s| -> PyResult<()> {
             let mut handles = Vec::with_capacity(n_decomp);
@@ -248,6 +251,12 @@ fn scan_shards(
                         total_scanned.fetch_add(b, Ordering::Relaxed);
                         total_filtered.fetch_add(c, Ordering::Relaxed);
                         total_hits.fetch_add(d, Ordering::Relaxed);
+                        if let Some(cb) = callback {
+                            Python::with_gil(|py| -> PyResult<()> {
+                                cb.call1(py, (shard.to_string_lossy().into_owned(),))?;
+                                Ok(())
+                            })?;
+                        }
                     }
                 });
                 handles.push(h);

@@ -7,6 +7,7 @@ import tempfile
 from pathlib import Path
 
 import polars as pl
+from tqdm import tqdm
 
 from . import _core
 
@@ -18,7 +19,7 @@ def get_filter_model(weights, metadata):
     )
 
 
-def scan_shards(scanner, shards, output_path, filter_model=None, n_decompress=None):
+def scan_shards(scanner, shards, output_path, filter_model=None, n_decompress=None, progress=True):
     """Scan a list of shards (or a directory of them) and concatenate
     per-shard parquet outputs into `output_path`.
 
@@ -41,9 +42,15 @@ def scan_shards(scanner, shards, output_path, filter_model=None, n_decompress=No
         result_files.append(tmp)
 
     try:
-        total_articles, total_scanned, total_filtered, total_hits = _core.scan_shards(
-            scanner, shard_list, result_files, filter_model, n_decompress
-        )
+        pbar = tqdm(total=len(shard_list)) if progress else None
+        callback = (lambda _shard: pbar.update(1)) if pbar is not None else None
+        try:
+            total_articles, total_scanned, total_filtered, total_hits = _core.scan_shards(
+                scanner, shard_list, result_files, filter_model, n_decompress, callback
+            )
+        finally:
+            if pbar is not None:
+                pbar.close()
         pl.scan_parquet(result_files).sink_parquet(output_path)
     finally:
         for f in result_files:
