@@ -4,6 +4,10 @@ site_url: https://afg1.github.io/litscan-2/
 repo_url: https://github.com/afg1/litscan-2
 edit_uri: edit/main/docs/
 
+# Local working notes, not committed: keep local builds identical to CI.
+exclude_docs: |
+  ls1-comparison/
+
 validation:
   anchors: warn   # so `mkdocs build --strict` fails on broken #anchors too
 
@@ -44,5 +48,4 @@ nav:
   - Python usage: usage.md
   - Output files: outputs.md
   - RNA relevance filter: classifier.md
-  - Validation against LitScan 1: ls1-comparison/README.md
   - Open questions: open-questions.md

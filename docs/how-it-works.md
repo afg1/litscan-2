@@ -37,7 +37,7 @@ configured in `build_search_automaton` (`src/scanner.rs`):
 | `start_kind` | `Both` | Allows anchored searches, used by the boundary retry [below](#word-boundaries). |
 
 Measured on the full LitScan 1 vocabulary (23,887,833 terms): about 50 s to
-build, with ~9 GB peak RSS (from the [LS1 comparison](ls1-comparison/README.md)).
+build, with ~9 GB peak RSS (measured on a 10-core laptop, 2026-11-06).
 
 ## Building the automaton
 
@@ -148,8 +148,9 @@ is detected from the file's first bytes, not its extension.
 - **Encoding repair.** The bulk OA shards are double-encoded: UTF-8 bytes were
   read as Latin-1 and encoded again, so `Å` arrives as `Ã` + U+0085.
   `repair_double_utf8` (`src/lib.rs`) undoes this for each article. It leaves
-  correctly encoded text alone. The [LS1 comparison](ls1-comparison/README.md#bug-found-and-fixed-during-validation)
-  describes what this broke before it was fixed.
+  correctly encoded text alone. Without it, sentences and author names were
+  stored garbled, and garbage letters next to a term could fail the word-boundary
+  check, so real mentions were missed.
 
 ## Parallelism
 

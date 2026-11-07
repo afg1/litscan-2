@@ -11,7 +11,7 @@ The core is written in Rust and exposed to Python as the `litscan_2` package
 ## The idea in one paragraph
 
 The obvious way to do this is one search per term. LitScan 1 did that, and it
-had 23.9 million search jobs (see [Validation](ls1-comparison/README.md)).
+had 23.9 million search jobs.
 litscan-2 compiles **every** term into a single
 [Aho-Corasick](https://en.wikipedia.org/wiki/Aho%E2%80%93Corasick_algorithm)
 automaton once, then reads each article **once**. The cost of that pass grows
