@@ -35,6 +35,12 @@ pub fn metadata_path() -> PathBuf {
     fixture_dir().join("model_metadata.json")
 }
 
-pub fn test_ids() -> PathBuf {
-    fixture_dir().join("all_hgnc_ids.txt")
+#[allow(dead_code)]
+pub fn test_terms() -> PathBuf {
+    fixture_dir().join("sample_terms.tsv")
+}
+
+#[allow(dead_code)]
+pub fn mini_shard() -> PathBuf {
+    fixture_dir().join("mini_shard.xml")
 }

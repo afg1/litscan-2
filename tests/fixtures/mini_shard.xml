@@ -1,0 +1,56 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<articles>
+<article article-type="research-article">
+  <front>
+    <journal-meta><journal-title>Journal of Tests</journal-title></journal-meta>
+    <article-meta>
+      <article-id pub-id-type="pmcid">PMC100</article-id>
+      <article-id pub-id-type="pmid">9100</article-id>
+      <article-id pub-id-type="doi">10.1000/test.100</article-id>
+      <title-group><article-title>HOTAIR regulates chromatin</article-title></title-group>
+      <contrib-group>
+        <contrib contrib-type="author"><name><surname>Smith</surname><given-names>Jo</given-names></name></contrib>
+        <contrib contrib-type="author"><name><surname>Núñez</surname><given-names>Ana</given-names></name></contrib>
+      </contrib-group>
+      <pub-date pub-type="ppub"><year>2021</year></pub-date>
+      <pub-date pub-type="epub"><year>2020</year></pub-date>
+      <abstract><p>The long non-coding RNA HOTAIR binds PRC2 and silences HOXD genes.</p></abstract>
+    </article-meta>
+  </front>
+  <body>
+    <sec sec-type="results"><title>Results</title>
+      <p>Ünïcödé βeta text before MIR21 here. Not αMIR21 though.</p>
+    </sec>
+  </body>
+</article>
+<article article-type="research-article">
+  <front>
+    <article-meta>
+      <article-id pub-id-type="pmcid">PMC200</article-id>
+      <title-group><article-title>Nothing relevant</article-title></title-group>
+      <abstract><p>Bridge engineering and steel fatigue.</p></abstract>
+    </article-meta>
+  </front>
+  <body><sec><title>Methods</title><p>We measured beams.</p></sec></body>
+</article>
+<article article-type="brief-report">
+  <front>
+    <article-meta>
+      <article-id pub-id-type="pmcid">PMC300</article-id>
+      <title-group><article-title>Steel bridges</article-title></title-group>
+      <abstract><p>Bridge engineering, steel fatigue and corrosion of beams.</p></abstract>
+    </article-meta>
+  </front>
+  <body><sec><title>Discussion</title><p>Corrosion near MIR21 street.</p></sec></body>
+</article>
+<article xmlns:xlink="http://www.w3.org/1999/xlink" article-type="retraction">
+  <front>
+    <article-meta>
+      <article-id pub-id-type="pmcid">PMC400</article-id>
+      <title-group><article-title>Retraction notice</article-title></title-group>
+      <related-article related-article-type="retracted-article" ext-link-type="pmc" xlink:href="PMC100"/>
+    </article-meta>
+  </front>
+  <body><p>This article has been retracted at the request of the authors.</p></body>
+</article>
+</articles>
