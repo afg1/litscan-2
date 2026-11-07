@@ -1,0 +1,48 @@
+site_name: litscan-2
+site_description: Fast dictionary scanning of Europe PMC full text with Aho-Corasick
+site_url: https://afg1.github.io/litscan-2/
+repo_url: https://github.com/afg1/litscan-2
+edit_uri: edit/main/docs/
+
+validation:
+  anchors: warn   # so `mkdocs build --strict` fails on broken #anchors too
+
+theme:
+  name: material
+  features:
+    - content.code.copy
+    - navigation.sections
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      toggle: { icon: material/brightness-7, name: Dark mode }
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      toggle: { icon: material/brightness-4, name: Light mode }
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.highlight
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+  - pymdownx.arithmatex:
+      generic: true
+
+extra_javascript:
+  - https://cdn.jsdelivr.net/npm/mathjax@3.2.2/es5/tex-mml-chtml.js
+
+nav:
+  - Home: index.md
+  - How it works: how-it-works.md
+  - Python usage: usage.md
+  - Output files: outputs.md
+  - RNA relevance filter: classifier.md
+  - Validation against LitScan 1: ls1-comparison/README.md
+  - Open questions: open-questions.md

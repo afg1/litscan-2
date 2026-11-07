@@ -70,3 +70,8 @@ docs/_build/
 
 # Pyenv
 .python-version
+
+# mkdocs build output
+/site
+
+.serena/
