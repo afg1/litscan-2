@@ -19,8 +19,9 @@ impl Author {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum SectionKind {
+    Title,
     Abstract,
     Introduction,
     Methods,
@@ -36,6 +37,7 @@ pub enum SectionKind {
 impl SectionKind {
     pub fn as_str(&self) -> &'static str {
         match self {
+            SectionKind::Title => "title",
             SectionKind::Abstract => "abstract",
             SectionKind::Introduction => "introduction",
             SectionKind::Methods => "methods",
@@ -279,6 +281,9 @@ pub fn parse_article_node(article_node: roxmltree::Node) -> JatsArticle {
         {
             article.title = collect_text(title_node).into();
         }
+    }
+    if let Some(title) = &article.title {
+        article.sections.push(Section::new(None, title.clone(), SectionKind::Title));
     }
 
     if let Some(abstract_node) = article_node
@@ -562,6 +567,7 @@ mod tests {
         assert_eq!(
             kinds,
             vec![
+                SectionKind::Title,
                 SectionKind::Abstract,
                 SectionKind::Introduction,
                 SectionKind::Methods,
@@ -575,6 +581,8 @@ mod tests {
 
         let supp_count = article.sections_of_kind(SectionKind::Supplementary).count();
         assert_eq!(supp_count, 2);
+        assert_eq!(article.sections[0].text, "A title");
+    }
     }
 
     #[test]
