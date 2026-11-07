@@ -1,55 +1,49 @@
 """
-Post-processing pass: given a scanner hits parquet and the same shard
-directory the scanner ran over, emit one parquet row per unique
-`(pmcid, section, offset, sentence)` containing the full paragraph that
-surrounds the hit.
+Post-processing pass: given scanner mentions parquet(s) and the shards the
+scanner ran over, emit one parquet row per unique `(pmcid, section, sentence)`
+containing the full paragraph that surrounds the mention.
 
-Inner-join the result onto the hits parquet to attach paragraph context to
-every hit. Use the 4-key join when an article can have multiple sections
-sharing a `SectionKind` (which is common — `(pmcid, section, offset)` alone
-is not unique in the hits parquet):
-
-    hits = pl.read_parquet("hits.parquet")
+    mentions = pl.read_parquet("out/mentions/*.parquet")
     paras = pl.read_parquet("paragraphs.parquet")
-    joined = hits.join(paras, on=["pmcid", "section", "offset", "sentence"], how="left")
+    joined = mentions.join(paras, on=["pmcid", "section", "sentence"], how="left")
 """
 
 import os
 import tempfile
 from collections import defaultdict
-from pathlib import Path
 
 import polars as pl
 from tqdm import tqdm
 
 from . import _core
+from .scan import _shard_list
 
 
-def extract_paragraphs(hits_parquet, shards, output_path):
+def extract_paragraphs(mentions, shards, output_path):
     """Walk `shards`, look up the containing paragraph for every unique
-    `(pmcid, section, offset)` tuple in `hits_parquet`, and write a parquet
-    with columns `(pmcid, section, offset, paragraph)` to `output_path`.
+    `(pmcid, section, sentence)` in `mentions` (a parquet path, glob, or the
+    scanner's `mentions/` directory), and write a parquet with columns
+    `(pmcid, section, sentence, paragraph)` to `output_path`.
 
     `shards` is a directory or a list of shard paths — same shape as
     `scan_shards` accepts.
 
     Returns the total number of paragraph rows written.
     """
+    if isinstance(mentions, (str, os.PathLike)) and os.path.isdir(mentions):
+        mentions = os.path.join(mentions, "*.parquet")
     requests = (
-        pl.scan_parquet(hits_parquet)
-        .select("pmcid", "section", "offset", "sentence")
-        .unique(subset=["pmcid", "section", "offset", "sentence"])
+        pl.scan_parquet(mentions)
+        .select("pmcid", "section", "sentence")
+        .unique()
         .collect()
     )
 
-    by_pmcid: dict[str, list[tuple[str, int, str]]] = defaultdict(list)
-    for pmcid, section, offset, sentence in requests.iter_rows():
-        by_pmcid[pmcid].append((section, int(offset), sentence or ""))
+    by_pmcid: dict[str, list[tuple[str, str]]] = defaultdict(list)
+    for pmcid, section, sentence in requests.iter_rows():
+        by_pmcid[pmcid].append((section, sentence))
 
-    if isinstance(shards, (str, os.PathLike)) and os.path.isdir(shards):
-        shard_list = sorted(str(p) for p in Path(shards).iterdir() if p.is_file())
-    else:
-        shard_list = [str(s) for s in shards]
+    shard_list = _shard_list(shards)
 
     result_files: list[str] = []
     total_rows = 0
@@ -73,8 +67,7 @@ def extract_paragraphs(hits_parquet, shards, output_path):
                 schema={
                     "pmcid": pl.Categorical,
                     "section": pl.Categorical,
-                    "offset": pl.UInt32,
-                    "sentence": pl.Categorical,
+                    "sentence": pl.Utf8,
                     "paragraph": pl.Utf8,
                 }
             ).write_parquet(output_path)

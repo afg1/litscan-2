@@ -1,9 +1,9 @@
-//! Map scanner hit offsets back to the full paragraph that contained them.
+//! Map scanner mentions back to the full paragraph that contained them.
 //!
-//! The scanner emits one row per hit with `(pmcid, section, offset, sentence, ...)`
-//! where `offset` is a byte offset into the section's concatenated text. This
-//! module re-parses an article and, for a set of `(section, offset)` requests,
-//! returns the paragraph (one `<p>` worth of text) containing each offset.
+//! The scanner emits one row per mention with `(pmcid, section, sentence, ...)`.
+//! This module re-parses an article and, for a set of `(section, sentence)`
+//! requests, returns the paragraph (one `<p>` worth of text) containing the
+//! start of each sentence.
 //!
 //! Correctness relies on `jats::parse_article_node` storing paragraph byte
 //! spans in `Section::paragraphs`, built from the same concatenation the
@@ -13,36 +13,27 @@ use std::collections::HashMap;
 
 use crate::jats;
 
-/// One request to resolve: which section kind and which byte offset within
-/// the section's text. `sentence` is the sentence text the scanner recorded
-/// for this hit — used to disambiguate when an article has multiple sections
-/// sharing a `SectionKind` (e.g. several `"other"` sections, each with its
-/// own offset range). An empty `sentence` disables that check.
+/// One request to resolve: the section kind and the sentence the scanner
+/// recorded for a mention.
 #[derive(Clone, Debug)]
 pub struct Request {
     pub section: String,
-    pub offset: u32,
     pub sentence: String,
 }
 
-/// One resolved paragraph for a request. `section`, `offset` and `sentence`
-/// echo the request so output rows can be inner-joined onto the hits parquet
-/// on any of `(pmcid, section, offset)` or `(pmcid, section, offset, sentence)`.
-/// Use the 4-key join when `(pmcid, section, offset)` is non-unique in hits
-/// (which happens when an article has multiple sections sharing a kind).
+/// One resolved paragraph for a request. `section` and `sentence` echo the
+/// request so output rows can be joined onto mentions on
+/// `(pmcid, section, sentence)`.
 #[derive(Clone, Debug)]
 pub struct ResolvedParagraph {
     pub section: String,
-    pub offset: u32,
     pub sentence: String,
     pub paragraph: String,
 }
 
-/// For each `(section, offset)` request, find the paragraph in the article
-/// that contains the offset. Multiple sections can share a `SectionKind`
-/// (e.g. several `"other"` sections); we check each in document order and
-/// emit one result per section whose paragraph spans contain the offset.
-/// Requests that don't resolve to any paragraph are skipped.
+/// For each `(section, sentence)` request, find the paragraph containing the
+/// sentence's start in the first section of that kind (document order) whose
+/// text contains the sentence. Unresolved requests are skipped.
 pub fn extract_paragraphs_for_article(
     article_node: roxmltree::Node,
     requests: &[Request],
@@ -56,9 +47,8 @@ pub fn extract_paragraphs_for_article(
         by_kind.entry(req.section.as_str()).or_default().push(req);
     }
 
-    // Track which request indices have been resolved so we don't emit a
-    // second paragraph for the same `(section, offset, sentence)` when
-    // multiple sections of the same kind coincidentally contain the offset.
+    // Track which requests have been resolved so we don't emit a second
+    // paragraph when several sections of the same kind contain the sentence.
     let mut resolved_idx: Vec<bool> = vec![false; requests.len()];
     let request_index: HashMap<*const Request, usize> = requests
         .iter()
@@ -77,25 +67,16 @@ pub fn extract_paragraphs_for_article(
             if resolved_idx[idx] {
                 continue;
             }
-            let Some(paragraph) = find_paragraph(&section.text, &section.paragraphs, req.offset)
-            else {
+            if req.sentence.is_empty() {
+                continue;
+            }
+            let Some(offset) = section.text.find(req.sentence.as_str()) else { continue };
+            let Some(paragraph) = find_paragraph(&section.text, &section.paragraphs, offset) else {
                 continue;
             };
-            // Disambiguate: if the scanner recorded a sentence, only accept
-            // the paragraph if it actually contains that sentence. Sentences
-            // can pick up the `\n` paragraph separator at either end when
-            // Unicode segmentation runs across a paragraph boundary, so
-            // compare against the trimmed sentence.
-            if !req.sentence.is_empty() {
-                let needle = req.sentence.trim();
-                if !needle.is_empty() && !paragraph.contains(needle) {
-                    continue;
-                }
-            }
             resolved_idx[idx] = true;
             out.push(ResolvedParagraph {
                 section: kind_str.to_string(),
-                offset: req.offset,
                 sentence: req.sentence.clone(),
                 paragraph,
             });
@@ -105,8 +86,7 @@ pub fn extract_paragraphs_for_article(
     out
 }
 
-fn find_paragraph(text: &str, spans: &[(usize, usize)], offset: u32) -> Option<String> {
-    let off = offset as usize;
+fn find_paragraph(text: &str, spans: &[(usize, usize)], off: usize) -> Option<String> {
     let idx = spans.binary_search_by(|&(start, end)| {
         if off >= end {
             std::cmp::Ordering::Less
@@ -149,28 +129,24 @@ mod tests {
             .find(|s| s.kind == SectionKind::Results)
             .unwrap();
 
-        // Verify the section actually has 3 paragraph spans.
-        assert_eq!(results_section.paragraphs.len(), 3);
+        // The section title plus 3 paragraphs.
+        assert_eq!(results_section.paragraphs.len(), 4);
 
-        // Pick an offset inside the second paragraph (location of "Xist").
-        let xist_offset = results_section.text.find("Xist").unwrap() as u32;
         let requests = vec![Request {
             section: "results".to_string(),
-            offset: xist_offset,
-            sentence: String::new(),
+            sentence: "Second paragraph mentions Xist later on.".to_string(),
         }];
 
         let resolved = extract_paragraphs_for_article(node, &requests);
         assert_eq!(resolved.len(), 1);
         assert_eq!(resolved[0].section, "results");
-        assert_eq!(resolved[0].offset, xist_offset);
         assert!(resolved[0].paragraph.contains("Xist"));
         assert!(!resolved[0].paragraph.contains("Airn"));
         assert!(!resolved[0].paragraph.contains("Kcnq1ot1"));
     }
 
     #[test]
-    fn out_of_range_offset_is_skipped() {
+    fn unknown_sentence_is_skipped() {
         let xml = r#"<?xml version="1.0"?>
 <article>
   <front><article-meta><article-id pub-id-type="pmcid">PMC1</article-id></article-meta></front>
@@ -180,7 +156,7 @@ mod tests {
         let (_pmcid, node) = jats::article_nodes(&doc).next().unwrap();
         let resolved = extract_paragraphs_for_article(
             node,
-            &[Request { section: "introduction".to_string(), offset: 9999, sentence: String::new() }],
+            &[Request { section: "introduction".to_string(), sentence: "Not here.".to_string() }],
         );
         assert!(resolved.is_empty());
     }
