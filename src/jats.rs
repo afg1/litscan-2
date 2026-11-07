@@ -167,10 +167,15 @@ fn build_paragraph_text<'a, 'input: 'a, I>(p_nodes: I) -> (String, Vec<(usize, u
 where
     I: IntoIterator<Item = roxmltree::Node<'a, 'input>>,
 {
+    build_block_text(p_nodes.into_iter().map(collect_text))
+}
+
+/// Same as `build_paragraph_text`, over already-extracted block strings.
+fn build_block_text<I: IntoIterator<Item = Option<String>>>(blocks: I) -> (String, Vec<(usize, usize)>) {
     let mut text = String::new();
     let mut spans: Vec<(usize, usize)> = Vec::new();
-    for p_node in p_nodes {
-        if let Some(t) = collect_text(p_node) {
+    for block in blocks {
+        if let Some(t) = block {
             let start = text.len();
             text.push_str(&t);
             let end = text.len();
@@ -182,6 +187,33 @@ where
     text.truncate(trimmed_len);
     spans.retain(|&(s, _)| s < trimmed_len);
     (text, spans)
+}
+
+/// Text blocks of a container: each `<p>`, plus the `<title>` of every
+/// `<sec>` and `<caption>`, in document order. Block-level elements are kept
+/// apart so a title is never glued onto the next paragraph's first word
+/// (shard XML has no whitespace between tags).
+fn is_text_block(n: &roxmltree::Node) -> bool {
+    n.has_tag_name("p")
+        || (n.has_tag_name("title")
+            && n.parent().map_or(false, |p| p.has_tag_name("sec") || p.has_tag_name("caption")))
+}
+
+fn in_float(n: &roxmltree::Node) -> bool {
+    n.ancestors().any(|a| a.has_tag_name("fig") || a.has_tag_name("table-wrap"))
+}
+
+/// One line per `<tr>`, cells joined with " | " so adjacent cells never fuse
+/// into one token.
+fn table_rows<'a, 'input: 'a>(tw_node: roxmltree::Node<'a, 'input>) -> impl Iterator<Item = Option<String>> + 'a {
+    tw_node.descendants().filter(|n| n.has_tag_name("tr")).map(|tr| {
+        let cells: Vec<String> = tr
+            .children()
+            .filter(|c| c.has_tag_name("td") || c.has_tag_name("th"))
+            .filter_map(collect_text)
+            .collect();
+        (!cells.is_empty()).then(|| cells.join(" | "))
+    })
 }
 
 pub struct JatsArticle {
@@ -601,6 +633,30 @@ mod tests {
         assert_eq!(supp_count, 2);
         assert_eq!(article.sections[0].text, "A title");
     }
+
+    #[test]
+    fn titles_body_text_and_table_cells_are_scanned() {
+        // No whitespace between tags, as in the real shards.
+        let xml = concat!(
+            r#"<article><front><article-meta>"#,
+            r#"<abstract><sec><title>Background</title><p>MIR21 matters.</p></sec></abstract>"#,
+            r#"</article-meta></front><body>"#,
+            r#"<p>Loose body text with HOTAIR.</p>"#,
+            r#"<sec><title>Results</title><sec><title>XIST knockdown</title><p>Body.</p></sec></sec>"#,
+            r#"<fig><label>Figure 1</label><caption><title>TERC levels</title><p>Cap.</p></caption></fig>"#,
+            r#"</body><floats-group><table-wrap><label>Table 1</label><table>"#,
+            r#"<tr><th>Gene</th><th>Fold</th></tr><tr><td>MCM5</td><td>2.1</td></tr>"#,
+            r#"</table></table-wrap></floats-group></article>"#,
+        );
+        let a = parse(xml).expect("parse");
+        let text_of = |k: SectionKind| -> Vec<String> { a.sections_of_kind(k).map(|s| s.text.clone()).collect() };
+        assert_eq!(a.abstract_text.as_deref(), Some("Background\nMIR21 matters."));
+        assert_eq!(text_of(SectionKind::Other), vec!["Loose body text with HOTAIR."]);
+        assert_eq!(text_of(SectionKind::Results), vec!["Results\nXIST knockdown\nBody."]);
+        assert_eq!(text_of(SectionKind::Figure), vec!["TERC levels\nCap."]);
+        assert_eq!(text_of(SectionKind::Table), vec!["Gene | Fold\nMCM5 | 2.1"]);
+    }
+
     #[test]
     fn metadata_ids_year_authors() {
         let xml = r#"<?xml version="1.0"?>
