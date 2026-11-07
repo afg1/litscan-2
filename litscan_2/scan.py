@@ -3,10 +3,8 @@ Utilities to scan a directory/list of JATS archive shards.
 """
 
 import os
-import tempfile
 from pathlib import Path
 
-import polars as pl
 from tqdm import tqdm
 
 from . import _core
@@ -19,44 +17,53 @@ def get_filter_model(weights, metadata):
     )
 
 
-def scan_shards(scanner, shards, output_path, filter_model=None, n_decompress=None, progress=True):
-    """Scan a list of shards (or a directory of them) and concatenate
-    per-shard parquet outputs into `output_path`.
+def _shard_list(shards):
+    if isinstance(shards, (str, os.PathLike)) and os.path.isdir(shards):
+        return sorted(str(p) for p in Path(shards).iterdir() if p.is_file())
+    return [str(s) for s in shards]
+
+
+def scan_shards(
+    scanner,
+    shards,
+    output_dir,
+    filter_model=None,
+    min_probability=None,
+    n_decompress=None,
+    progress=True,
+):
+    """Scan a list of shards (or a directory of them) into `output_dir`.
+
+    For each shard `<shard>` this writes `mentions/<shard>.parquet`,
+    `articles/<shard>.parquet`, `notices/<shard>.parquet` and, last,
+    `manifest/<shard>.json`. A shard
+    is complete only once its manifest exists. Re-running overwrites.
+
+    `filter_model` adds `rna_probability` to the articles output. Articles are
+    skipped only if `min_probability` is also set.
 
     Multiple shards are decompressed and scanned concurrently in Rust. Set
-    `n_decompress` to override the number of decompression workers (default
-    is ceil(ncpu/4), with the remaining CPUs used by the per-shard parallel
-    scan).
+    `n_decompress` to override the number of shard workers (default
+    ceil(ncpu/4)). Each worker reads, decompresses and splits one shard at a
+    time; parsing and scanning run on one pool that uses every CPU. It mainly
+    bounds memory: each in-flight shard holds its decompressed text (~1-1.5 GB).
 
-    Returns (total_articles, scanned_articles, filtered_articles, total_hits).
+    Returns (articles_total, articles_scanned, articles_below_threshold, mentions, notices)
+    summed over all shards.
     """
-    if isinstance(shards, (str, os.PathLike)) and os.path.isdir(shards):
-        shard_list = sorted(str(p) for p in Path(shards).iterdir() if p.is_file())
-    else:
-        shard_list = [str(s) for s in shards]
-
-    result_files = []
-    for _ in shard_list:
-        fd, tmp = tempfile.mkstemp(suffix=".parquet")
-        os.close(fd)
-        result_files.append(tmp)
-
+    shard_list = _shard_list(shards)
+    pbar = tqdm(total=len(shard_list)) if progress else None
+    callback = (lambda _shard: pbar.update(1)) if pbar is not None else None
     try:
-        pbar = tqdm(total=len(shard_list)) if progress else None
-        callback = (lambda _shard: pbar.update(1)) if pbar is not None else None
-        try:
-            total_articles, total_scanned, total_filtered, total_hits = _core.scan_shards(
-                scanner, shard_list, result_files, filter_model, n_decompress, callback
-            )
-        finally:
-            if pbar is not None:
-                pbar.close()
-        pl.scan_parquet(result_files).sink_parquet(output_path)
+        return _core.scan_shards(
+            scanner,
+            shard_list,
+            str(output_dir),
+            filter_model,
+            min_probability,
+            n_decompress,
+            callback,
+        )
     finally:
-        for f in result_files:
-            try:
-                os.remove(f)
-            except OSError:
-                pass
-
-    return total_articles, total_scanned, total_filtered, total_hits
+        if pbar is not None:
+            pbar.close()
