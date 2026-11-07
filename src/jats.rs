@@ -465,6 +465,92 @@ pub fn parse_article_node(article_node: roxmltree::Node) -> JatsArticle {
     article
 }
 
+const XLINK: &str = "http://www.w3.org/1999/xlink";
+
+/// `related-article-type` values emitted to `notices/`. Backward links sit on
+/// the notice and point at the original; forward links sit on the original
+/// and point at the notice.
+pub const NOTICE_RELATIONS: [&str; 8] = [
+    "retracted-article",
+    "corrected-article",
+    "object-of-concern",
+    "retraction-forward",
+    "correction-forward",
+    "expression-of-concern",
+    "updated-article",
+    "addended-article",
+];
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Notice {
+    pub relation: &'static str,
+    /// `pmcid`, `doi` or `pmid`.
+    pub target_id_type: &'static str,
+    pub target_id: String,
+}
+
+fn normalise_target(link_type: &str, id: &str) -> Option<(&'static str, String)> {
+    let id = id.trim();
+    match link_type.to_ascii_lowercase().as_str() {
+        "pmc" | "pmcid" => {
+            let digits = id.trim_start_matches("PMC").trim_start_matches("pmc");
+            (!digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()))
+                .then(|| ("pmcid", format!("PMC{digits}")))
+        }
+        "pubmed" | "pmid" => {
+            (!id.is_empty() && id.bytes().all(|b| b.is_ascii_digit())).then(|| ("pmid", id.to_string()))
+        }
+        "doi" => {
+            let lower = id.to_ascii_lowercase();
+            let cut = ["https://doi.org/", "http://doi.org/", "https://dx.doi.org/", "http://dx.doi.org/", "doi:"]
+                .iter()
+                .find(|p| lower.starts_with(*p))
+                .map_or(0, |p| p.len());
+            let doi = id[cut..].trim();
+            doi.starts_with("10.").then(|| ("doi", doi.to_string()))
+        }
+        _ => None,
+    }
+}
+
+/// Correction / retraction / expression-of-concern links in the article's
+/// own front matter (not `<sub-article>`s, not the body). The target comes
+/// from the element's `ext-link-type` + `xlink:href`, else a nested
+/// `<ext-link>`, else a nested `<pub-id>`.
+// ponytail: links with an unrecognised id type (e.g. a bare URL) are dropped.
+pub fn notices(article_node: roxmltree::Node) -> Vec<Notice> {
+    let Some(front) = article_node.children().find(|n| n.has_tag_name("front")) else {
+        return Vec::new();
+    };
+    let mut out: Vec<Notice> = front
+        .descendants()
+        .filter(|n| n.has_tag_name("related-article"))
+        .filter_map(|ra| {
+            let rel = ra.attribute("related-article-type")?;
+            let relation = *NOTICE_RELATIONS.iter().find(|r| **r == rel)?;
+            let own = ra.attribute("ext-link-type").zip(ra.attribute((XLINK, "href")));
+            let ext = || {
+                ra.descendants()
+                    .filter(|n| n.has_tag_name("ext-link"))
+                    .find_map(|e| e.attribute("ext-link-type").zip(e.attribute((XLINK, "href"))))
+            };
+            let pub_id = || {
+                ra.descendants()
+                    .filter(|n| n.has_tag_name("pub-id"))
+                    .find_map(|e| e.attribute("pub-id-type").zip(e.text()))
+            };
+            let (t, id) = [own, ext(), pub_id()]
+                .into_iter()
+                .flatten()
+                .find_map(|(t, id)| normalise_target(t, id))?;
+            Some(Notice { relation, target_id_type: t, target_id: id })
+        })
+        .collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
 pub fn parse(xml_string: &str) -> Result<JatsArticle, Box<dyn Error>> {
     let parsing_opts = roxmltree::ParsingOptions {
         allow_dtd: true,
@@ -656,6 +742,52 @@ mod tests {
         assert_eq!(text_of(SectionKind::Figure), vec!["TERC levels\nCap."]);
         assert_eq!(text_of(SectionKind::Table), vec!["Gene | Fold\nMCM5 | 2.1"]);
     }
+
+    #[test]
+    fn notices_from_front_matter() {
+        let xml = r#"<article xmlns:xlink="http://www.w3.org/1999/xlink" article-type="retraction"><front><article-meta>
+<related-article related-article-type="retracted-article" ext-link-type="pmc" xlink:href="PMC7519587"/>
+<related-article related-article-type="corrected-article" ext-link-type="doi" xlink:href="https://doi.org/10.1021/X.1"/>
+<related-article related-article-type="object-of-concern">See <ext-link ext-link-type="pmcid" xlink:href="PMC8890747">this</ext-link></related-article>
+<related-article related-article-type="correction-forward"><pub-id pub-id-type="pmid">42</pub-id></related-article>
+<related-article related-article-type="reviewed-article" ext-link-type="pmc" xlink:href="PMC1"/>
+<related-article related-article-type="retracted-article" ext-link-type="uri" xlink:href="https://example.org"/>
+</article-meta></front>
+<sub-article><front-stub><related-article related-article-type="retracted-article" ext-link-type="pmc" xlink:href="PMC9"/></front-stub></sub-article>
+</article>"#;
+        let doc = parse_document(xml).unwrap();
+        let node = doc.root().descendants().find(|n| n.has_tag_name("article")).unwrap();
+        let got: Vec<(&str, &str, String)> =
+            notices(node).into_iter().map(|n| (n.relation, n.target_id_type, n.target_id)).collect();
+        assert_eq!(
+            got,
+            vec![
+                ("corrected-article", "doi", "10.1021/X.1".to_string()),
+                ("correction-forward", "pmid", "42".to_string()),
+                ("object-of-concern", "pmcid", "PMC8890747".to_string()),
+                ("retracted-article", "pmcid", "PMC7519587".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn splits_shard_into_articles() {
+        let shard = r#"<?xml version="1.0"?><!-- c --><articles xmlns:xlink="http://www.w3.org/1999/xlink"><article a="1"><front><article-meta><article-id pub-id-type="pmcid">PMC1</article-id></article-meta></front><body><sub-article/></body></article><article-ish/><article><front><article-meta><article-id pub-id-type="pmcid">PMC2</article-id><related-article xlink:href="PMC1"/></article-meta></front></article></articles>"#;
+        let p = split_articles(shard).expect("splittable");
+        assert_eq!(p.root_name, "articles");
+        assert_eq!(p.len(), 2);
+        for i in 0..2 {
+            let src = p.document_source(i);
+            let doc = parse_document(&src).expect("piece parses, xlink prefix resolves");
+            let ids: Vec<String> = article_nodes(&doc).map(|(id, _)| id).collect();
+            assert_eq!(ids, vec![format!("PMC{}", i + 1)]);
+        }
+        assert!(split_articles("<article><front/></article>").is_none());
+        assert!(split_articles("<!DOCTYPE articles><articles><article></article></articles>").is_none());
+        assert!(split_articles("<articles><article></article></article></articles>").is_none());
+        assert!(split_articles("<articles><article><front/></articles>").is_none());
+    }
+
 
     #[test]
     fn metadata_ids_year_authors() {
