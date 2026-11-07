@@ -1,11 +1,13 @@
 [build-system]
-requires = ["maturin>=1.8,<2.0"]
+requires = ["maturin>=1.9,<2.0"]  # 1.9+ for PEP 639 license / license-files
 build-backend = "maturin"
 
 [project]
 name = "litscan-2"
 description = "Fast Aho-Corasick scanning of Europe PMC full text for millions of identifiers"
 readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
 requires-python = ">=3.12"
 classifiers = [
     "Programming Language :: Rust",
