@@ -4,6 +4,8 @@ build-backend = "maturin"
 
 [project]
 name = "litscan-2"
+description = "Fast Aho-Corasick scanning of Europe PMC full text for millions of identifiers"
+readme = "README.md"
 requires-python = ">=3.12"
 classifiers = [
     "Programming Language :: Rust",
@@ -15,6 +17,10 @@ dependencies = [
     "polars>=1.8.2",
     "tqdm>=4.67.3",
 ]
+
+[project.urls]
+Documentation = "https://afg1.github.io/litscan-2/"
+Repository = "https://github.com/afg1/litscan-2"
 [tool.maturin]
 module-name = "litscan_2._core"
 python-source = "."
