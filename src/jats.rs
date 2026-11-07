@@ -185,6 +185,11 @@ where
 }
 
 pub struct JatsArticle {
+    pub pmcid: Option<String>,
+    pub pmid: Option<String>,
+    pub doi: Option<String>,
+    /// Earliest `<pub-date><year>` in `article-meta`.
+    pub year: Option<i32>,
     pub journal: Option<String>,
     pub article_type: Option<String>,
     pub title: Option<String>,
@@ -196,6 +201,10 @@ pub struct JatsArticle {
 impl JatsArticle {
     fn new() -> Self {
         JatsArticle {
+            pmcid: None,
+            pmid: None,
+            doi: None,
+            year: None,
             journal: None,
             article_type: None,
             title: None,
@@ -261,6 +270,15 @@ pub fn parse_article_node(article_node: roxmltree::Node) -> JatsArticle {
     let mut article = JatsArticle::new();
 
     article.article_type = article_node.attribute("article-type").map(String::from);
+    article.pmcid = extract_article_id(article_node, "pmcid");
+    article.pmid = extract_article_id(article_node, "pmid");
+    article.doi = extract_article_id(article_node, "doi");
+    article.year = article_node
+        .descendants()
+        .filter(|n| n.has_tag_name("pub-date") && n.ancestors().any(|a| a.has_tag_name("article-meta")))
+        .filter_map(|d| d.children().find(|n| n.has_tag_name("year")))
+        .filter_map(|y| y.text().and_then(|t| t.trim().parse::<i32>().ok()))
+        .min();
 
     if let Some(journal_node) = article_node
         .descendants()
@@ -583,6 +601,30 @@ mod tests {
         assert_eq!(supp_count, 2);
         assert_eq!(article.sections[0].text, "A title");
     }
+    #[test]
+    fn metadata_ids_year_authors() {
+        let xml = r#"<?xml version="1.0"?>
+<article article-type="research-article">
+  <front><article-meta>
+    <article-id pub-id-type="pmcid">PMC9</article-id>
+    <article-id pub-id-type="pmid">123</article-id>
+    <article-id pub-id-type="doi">10.1/x</article-id>
+    <contrib-group>
+      <contrib contrib-type="author"><name><surname>Smith</surname><given-names>Jo</given-names></name></contrib>
+      <contrib contrib-type="author"><name><surname>Onlysurname</surname></name></contrib>
+    </contrib-group>
+    <pub-date pub-type="ppub"><year>2021</year></pub-date>
+    <pub-date pub-type="epub"><year>2020</year></pub-date>
+  </article-meta></front>
+</article>"#;
+        let a = parse(xml).expect("parse");
+        assert_eq!(a.pmcid.as_deref(), Some("PMC9"));
+        assert_eq!(a.pmid.as_deref(), Some("123"));
+        assert_eq!(a.doi.as_deref(), Some("10.1/x"));
+        assert_eq!(a.year, Some(2020));
+        assert_eq!(a.authors_string().as_deref(), Some("Smith, Jo; Onlysurname"));
+        assert!(a.title.is_none());
+        assert!(a.sections.is_empty());
     }
 
     #[test]
