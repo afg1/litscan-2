@@ -357,7 +357,8 @@ pub fn parse_article_node(article_node: roxmltree::Node) -> JatsArticle {
         .descendants()
         .find(|n| n.has_tag_name("abstract"))
     {
-        article.abstract_text = collect_text(abstract_node);
+        let (text, _) = build_paragraph_text(abstract_node.descendants().filter(is_text_block));
+        article.abstract_text = if text.is_empty() { collect_text(abstract_node) } else { Some(text) };
         if let Some(text) = &article.abstract_text {
             article.sections.push(Section::new(
                 Some("Abstract".to_string()),
@@ -403,10 +404,8 @@ pub fn parse_article_node(article_node: roxmltree::Node) -> JatsArticle {
                 .and_then(|n| collect_text(n));
             let sec_type = sec_node.attribute("sec-type");
             let kind = SectionKind::classify(sec_type, title.as_deref());
-            let (text, paragraphs) = build_paragraph_text(sec_node.descendants().filter(|n| {
-                n.has_tag_name("p")
-                    && !n.ancestors().any(|a| a.has_tag_name("fig") || a.has_tag_name("table-wrap"))
-            }));
+            let (text, paragraphs) =
+                build_paragraph_text(sec_node.descendants().filter(|n| is_text_block(n) && !in_float(n)));
             article.sections.push(Section {
                 title,
                 text,
@@ -415,7 +414,24 @@ pub fn parse_article_node(article_node: roxmltree::Node) -> JatsArticle {
             });
         }
 
-        for fig_node in body_node.descendants().filter(|n| n.has_tag_name("fig")) {
+        // Body text that sits outside any top-level <sec>.
+        let (text, paragraphs) = build_paragraph_text(body_node.descendants().filter(|n| {
+            is_text_block(n) && !in_float(n) && !n.ancestors().any(|a| a.has_tag_name("sec"))
+        }));
+        if !text.is_empty() {
+            article.sections.push(Section { title: None, text, kind: SectionKind::Other, paragraphs });
+        }
+    }
+
+    // Figures and tables anywhere in the article (body, floats-group, back),
+    // except inside <sub-article>s, which are separate documents.
+    {
+        let floats = |tag: &'static str| {
+            article_node
+                .descendants()
+                .filter(move |n| n.has_tag_name(tag) && !n.ancestors().any(|a| a.has_tag_name("sub-article")))
+        };
+        for fig_node in floats("fig") {
             let label = fig_node
                 .children()
                 .find(|n| n.has_tag_name("label"))
@@ -431,7 +447,7 @@ pub fn parse_article_node(article_node: roxmltree::Node) -> JatsArticle {
                 (None, None) => None,
             };
             let (text, paragraphs) = if let Some(caption) = caption_node {
-                build_paragraph_text(caption.descendants().filter(|n| n.has_tag_name("p")))
+                build_paragraph_text(caption.descendants().filter(is_text_block))
             } else {
                 (String::new(), Vec::new())
             };
@@ -445,7 +461,7 @@ pub fn parse_article_node(article_node: roxmltree::Node) -> JatsArticle {
             }
         }
 
-        for tw_node in body_node.descendants().filter(|n| n.has_tag_name("table-wrap")) {
+        for tw_node in floats("table-wrap") {
             let label = tw_node
                 .children()
                 .find(|n| n.has_tag_name("label"))
@@ -462,12 +478,14 @@ pub fn parse_article_node(article_node: roxmltree::Node) -> JatsArticle {
             };
             let caption_ps = caption_node
                 .into_iter()
-                .flat_map(|c| c.descendants().filter(|n| n.has_tag_name("p")));
+                .flat_map(|c| c.descendants().filter(is_text_block))
+                .map(collect_text);
             let foot_ps = tw_node
                 .children()
                 .filter(|n| n.has_tag_name("table-wrap-foot"))
-                .flat_map(|f| f.descendants().filter(|n| n.has_tag_name("p")));
-            let (text, paragraphs) = build_paragraph_text(caption_ps.chain(foot_ps));
+                .flat_map(|f| f.descendants().filter(|n| n.has_tag_name("p")))
+                .map(collect_text);
+            let (text, paragraphs) = build_block_text(caption_ps.chain(table_rows(tw_node)).chain(foot_ps));
             if title.is_some() || !text.is_empty() {
                 article.sections.push(Section {
                     title,
@@ -593,6 +611,116 @@ pub fn parse_archive(xml_string: &str) -> Result<HashMap<String, JatsArticle>, B
     Ok(articles)
 }
 
+/// A shard split into its articles, so they can be parsed in parallel.
+pub struct ShardPieces<'a> {
+    text: &'a str,
+    /// The root start tag, e.g. `<articles xmlns:xlink="…">`, re-applied to
+    /// each piece so namespace declarations on the root still resolve.
+    root_open: &'a str,
+    root_name: &'a str,
+    /// Per top-level article: its byte span, and the spans of `<article>`s
+    /// nested inside it, which are cut out.
+    articles: Vec<((usize, usize), Vec<(usize, usize)>)>,
+}
+
+impl ShardPieces<'_> {
+    pub fn len(&self) -> usize {
+        self.articles.len()
+    }
+
+    /// Article `i` as a standalone document.
+    pub fn document_source(&self, i: usize) -> String {
+        let ((start, end), cuts) = &self.articles[i];
+        let mut src = String::with_capacity(self.root_open.len() + end - start + self.root_name.len() + 3);
+        src.push_str(self.root_open);
+        let mut pos = *start;
+        for &(cs, ce) in cuts {
+            src.push_str(&self.text[pos..cs]);
+            pos = ce;
+        }
+        src.push_str(&self.text[pos..*end]);
+        src.push_str("</");
+        src.push_str(self.root_name);
+        src.push('>');
+        src
+    }
+}
+
+fn is_article_open(text: &str, at: usize) -> bool {
+    matches!(text.as_bytes().get(at + "<article".len()), Some(b' ' | b'\t' | b'\n' | b'\r' | b'>'))
+}
+
+/// Split `<root …><article …>…</article>…</root>` into its top-level
+/// articles by scanning for `<article` / `</article>` tags.
+///
+/// Some notices embed a full copy of the article they concern inside
+/// `<related-article>`. That copy is cut out of the notice (the
+/// `<related-article>` link itself stays), so the embedded paper is neither
+/// scanned twice nor mixed into the notice's own title/body.
+///
+/// Returns `None` for anything else (a single `<article>` file, a DOCTYPE
+/// that may define entities, unbalanced tags); the caller then parses the
+/// whole document.
+// ponytail: a literal "<article " or "</article>" inside a comment or CDATA
+// section would mis-split; the piece then fails to parse and the shard
+// errors loudly rather than producing wrong output.
+pub fn split_articles(text: &str) -> Option<ShardPieces<'_>> {
+    // Skip the XML declaration, comments and processing instructions.
+    let mut pos = 0;
+    let root_start = loop {
+        let lt = pos + text[pos..].find('<')?;
+        match text.as_bytes().get(lt + 1) {
+            Some(b'?') => pos = lt + text[lt..].find("?>")? + 2,
+            Some(b'!') if text[lt..].starts_with("<!--") => pos = lt + text[lt..].find("-->")? + 3,
+            Some(b'!') => return None, // DOCTYPE: entities would be lost per piece
+            _ => break lt,
+        }
+    };
+    let root_end = root_start + text[root_start..].find('>')? + 1;
+    let root_open = &text[root_start..root_end];
+    let root_name = root_open[1..].split(|c: char| c.is_whitespace() || c == '>' || c == '/').next()?;
+    if root_name == "article" || root_open.ends_with("/>") {
+        return None;
+    }
+
+    let body = &text.as_bytes()[root_end..];
+    let mut opens = memchr::memmem::find_iter(body, b"<article")
+        .map(|i| i + root_end)
+        .filter(|&i| is_article_open(text, i))
+        .peekable();
+    let mut closes = memchr::memmem::find_iter(body, b"</article>").map(|i| i + root_end).peekable();
+
+    let mut articles = Vec::new();
+    let (mut depth, mut start, mut cut_start) = (0usize, 0usize, 0usize);
+    let mut cuts = Vec::new();
+    loop {
+        let take_open = match (opens.peek(), closes.peek()) {
+            (Some(o), Some(c)) => o < c,
+            (Some(_), None) => true,
+            (None, Some(_)) => false,
+            (None, None) => break,
+        };
+        if take_open {
+            let o = opens.next().unwrap();
+            if depth == 0 {
+                start = o;
+            } else if depth == 1 {
+                cut_start = o;
+            }
+            depth += 1;
+        } else {
+            let end = closes.next().unwrap() + "</article>".len();
+            depth = depth.checked_sub(1)?;
+            if depth == 0 {
+                articles.push(((start, end), std::mem::take(&mut cuts)));
+            } else if depth == 1 {
+                cuts.push((cut_start, end));
+            }
+        }
+    }
+    (depth == 0).then_some(ShardPieces { text, root_open, root_name, articles })
+}
+
 /// Parse a JATS archive XML into a `Document` without materializing any
 /// `JatsArticle`. Pair with `article_nodes` to walk articles one at a time,
 /// optionally in parallel via rayon.
@@ -621,16 +749,25 @@ pub fn article_nodes<'a, 'input>(
     doc.root()
         .descendants()
         .filter(|n| n.has_tag_name("article"))
+        // Skip copies of other articles embedded in a notice's <related-article>.
+        .filter(|n| !n.ancestors().skip(1).any(|a| a.has_tag_name("article")))
         .filter_map(|article_node| extract_pmcid(article_node).map(|id| (id, article_node)))
 }
 
 fn extract_pmcid(article_node: roxmltree::Node) -> Option<String> {
+    extract_article_id(article_node, "pmcid")
+}
+
+/// First non-empty `<article-id pub-id-type="{kind}">` in document order, so
+/// the article's own `front/article-meta` wins over any `<sub-article>`.
+fn extract_article_id(article_node: roxmltree::Node, kind: &str) -> Option<String> {
     article_node
         .descendants()
         .filter(|n| n.has_tag_name("article-id"))
-        .find(|n| n.attribute("pub-id-type") == Some("pmcid"))
-        .and_then(|n| n.text())
+        .filter(|n| n.attribute("pub-id-type") == Some(kind))
+        .filter_map(|n| n.text())
         .map(|s| s.trim().to_string())
+        .find(|s| !s.is_empty())
 }
 
 fn collect_text(node: roxmltree::Node) -> Option<String> {
@@ -805,6 +942,33 @@ mod tests {
         assert!(split_articles("<articles><article><front/></articles>").is_none());
     }
 
+    #[test]
+    fn embedded_article_copy_is_cut_from_notice() {
+        let shard = concat!(
+            r#"<articles><article article-type="correction"><front><article-meta>"#,
+            r#"<article-id pub-id-type="pmcid">PMC2</article-id>"#,
+            r#"<related-article related-article-type="corrected-article" ext-link-type="pmc" xlink:href="PMC1" xmlns:xlink="http://www.w3.org/1999/xlink">"#,
+            r#"<article><front><article-meta><article-id pub-id-type="pmcid">PMC1</article-id>"#,
+            r#"<title-group><article-title>Embedded copy</article-title></title-group></article-meta></front></article>"#,
+            r#"</related-article><title-group><article-title>Correction notice</article-title></title-group>"#,
+            r#"</article-meta></front></article>"#,
+            r#"<article><front><article-meta><article-id pub-id-type="pmcid">PMC1</article-id></article-meta></front></article></articles>"#,
+        );
+        let p = split_articles(shard).expect("splittable");
+        assert_eq!(p.len(), 2);
+        let src = p.document_source(0);
+        assert!(!src.contains("Embedded copy"));
+        let doc = parse_document(&src).unwrap();
+        let (id, node) = article_nodes(&doc).next().unwrap();
+        assert_eq!(id, "PMC2");
+        assert_eq!(parse_article_node(node).title.as_deref(), Some("Correction notice"));
+        assert_eq!(notices(node).len(), 1, "the related-article link survives the cut");
+
+        // The whole-document path yields only top-level articles.
+        let doc = parse_document(shard).unwrap();
+        let ids: Vec<String> = article_nodes(&doc).map(|(id, _)| id).collect();
+        assert_eq!(ids, vec!["PMC2", "PMC1"]);
+    }
 
     #[test]
     fn metadata_ids_year_authors() {
