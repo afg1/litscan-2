@@ -259,6 +259,23 @@ impl JatsArticle {
         full_text.trim().to_string()
     }
 
+    /// `"Surname, Given; Surname, Given"`, the format the pipeline's
+    /// litscan-scan-job.py stored in `litscan_article.author`.
+    pub fn authors_string(&self) -> Option<String> {
+        let names: Vec<String> = self
+            .authors
+            .iter()
+            .filter_map(|a| match (a.surname.as_deref(), a.given_names.as_deref()) {
+                (Some(s), Some(g)) if !s.is_empty() && !g.is_empty() => Some(format!("{}, {}", s, g)),
+                (s, g) => {
+                    let n = format!("{}{}", s.unwrap_or(""), g.unwrap_or(""));
+                    (!n.is_empty()).then_some(n)
+                }
+            })
+            .collect();
+        (!names.is_empty()).then(|| names.join("; "))
+    }
+
     pub fn sections_of_kind(&self, kind: SectionKind) -> impl Iterator<Item = &Section> {
         self.sections.iter().filter(move |s| s.kind == kind)
     }
