@@ -84,6 +84,12 @@ def cmd_classify(args):
     _write_tsv(("label", "rna_probability", *folds, "text"), map(row, texts))
 
 
+def cmd_terms_info(args):
+    s = build_scanner(args.terms)
+    print(json.dumps({"n_terms": s.n_terms, "n_patterns": s.n_patterns,
+                      "n_shared_patterns": s.n_shared_patterns, "terms_sha256": s.terms_sha256}))
+
+
 def build_parser():
     parser = argparse.ArgumentParser(
         prog="litscan-2", description="Scan Europe PMC JATS full text for millions of identifiers.")
@@ -143,6 +149,11 @@ def build_parser():
     p.add_argument("text", nargs="*", help="text to score (default: read lines from stdin)")
     p.add_argument("--folds", action="store_true",
                    help="add each fold's decision value and probability (comma-separated)")
+
+    p = command("terms-info", cmd_terms_info, "build the scanner and print its stats as JSON",
+                "Build the scanner from TERMS and print n_terms, n_patterns, n_shared_patterns "
+                "(patterns shared by several term_ids) and terms_sha256 as JSON.")
+    p.add_argument("terms", help=terms_help)
     return parser
 
 

@@ -10,6 +10,7 @@ Installing the package adds a `litscan-2` command, which you can also run as
 | `paragraphs` | `extract_paragraphs` | One parquet file at `-o PATH`; the row count as JSON on stdout |
 | `scan-one` | `scan_one` | Hits as TSV on stdout |
 | `classify` | `TfidfClassifier.py_classify` | `label`, `rna_probability` and the first 80 characters of the text as TSV on stdout |
+| `terms-info` | `build_scanner` | Term and pattern counts and the terms file's SHA-256 as JSON on stdout |
 
 The commands use the rest of the API internally. `scan` and `scan-one` call
 `build_scanner`. `--model` and `--metadata` load a `TfidfClassifier` through
@@ -87,3 +88,16 @@ If you give no text arguments, every non-empty line on stdin is scored.
 `--folds` adds two columns before `text`: `fold_decisions` and `fold_prob`. Each
 holds one comma-separated value per cross-validation fold of the model, whose
 average gives `rna_probability`.
+
+## terms-info
+
+```bash
+litscan-2 terms-info terms.tsv
+# {"n_terms": 11101, "n_patterns": 11101, "n_shared_patterns": 0, "terms_sha256": "afb34577..."}
+```
+
+Builds the scanner without scanning anything. Use it to check a terms file
+before a long run. `n_shared_patterns` counts patterns that more than one
+`term_id` turns into, such as `MIR21` and `mir21`; a hit on one reports all of
+those term IDs. `terms_sha256` is the same value that `scan` writes to each
+manifest.
