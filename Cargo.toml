@@ -14,7 +14,7 @@ aho-corasick = "1.1.4"
 arrow = "54"
 flate2 = { version = "1", default-features = false, features = ["zlib-rs"] }
 parquet = "54"
-pyo3 = "0.24.0"
+pyo3 = "0.30.1"
 rayon = "1.12.0"
 regex = "1.12.3"
 roxmltree = "0.21.1"
