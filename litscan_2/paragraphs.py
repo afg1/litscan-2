@@ -19,14 +19,14 @@ from . import _core
 from .scan import _shard_list
 
 
-def extract_paragraphs(mentions, shards, output_path):
+def extract_paragraphs(mentions, shards, output_path, progress=True):
     """Walk `shards`, look up the containing paragraph for every unique
     `(pmcid, section, sentence)` in `mentions` (a parquet path, glob, or the
     scanner's `mentions/` directory), and write a parquet with columns
     `(pmcid, section, sentence, paragraph)` to `output_path`.
 
     `shards` is a directory or a list of shard paths — same shape as
-    `scan_shards` accepts.
+    `scan_shards` accepts. `progress=False` hides the progress bar.
 
     Returns the total number of paragraph rows written.
     """
@@ -48,7 +48,7 @@ def extract_paragraphs(mentions, shards, output_path):
     result_files: list[str] = []
     total_rows = 0
     try:
-        for shard_path in tqdm(shard_list):
+        for shard_path in tqdm(shard_list, disable=not progress):
             fd, tmp = tempfile.mkstemp(suffix=".parquet")
             os.close(fd)
             rows = _core.extract_paragraphs_for_shard(shard_path, dict(by_pmcid), tmp)
