@@ -13,7 +13,8 @@ Installing the package adds a `litscan-2` command, which you can also run as
 
 The commands use the rest of the API internally. `scan` and `scan-one` call
 `build_scanner`. `--model` and `--metadata` load a `TfidfClassifier` through
-`get_filter_model`. `classify` prints fields from the `ClassificationResult`.
+`get_filter_model`. `classify` prints fields from the `ClassificationResult`,
+and `classify --folds` prints all of them.
 For one shard, `scan` and `paragraphs` produce the same output as
 `scan_shard` and `extract_paragraphs_for_shard`.
 
@@ -82,3 +83,7 @@ label	rna_probability	text
 ```
 
 If you give no text arguments, every non-empty line on stdin is scored.
+
+`--folds` adds two columns before `text`: `fold_decisions` and `fold_prob`. Each
+holds one comma-separated value per cross-validation fold of the model, whose
+average gives `rna_probability`.

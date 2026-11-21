@@ -34,6 +34,10 @@ def _build_scanner(terms, quiet):
     return scanner
 
 
+def _floats(values):
+    return ",".join(f"{v:.6f}" for v in values)
+
+
 def _write_tsv(header, rows):
     sys.stdout.write("\t".join(header) + "\n")
     for row in rows:
@@ -73,9 +77,11 @@ def cmd_classify(args):
 
     def row(text):
         r = model.py_classify(text)
-        return r.label, f"{r.proba[1]:.6f}", text[:80]
+        folds = (_floats(r.fold_decisions), _floats(r.fold_prob)) if args.folds else ()
+        return r.label, f"{r.proba[1]:.6f}", *folds, text[:80]
 
-    _write_tsv(("label", "rna_probability", "text"), map(row, texts))
+    folds = ("fold_decisions", "fold_prob") if args.folds else ()
+    _write_tsv(("label", "rna_probability", *folds, "text"), map(row, texts))
 
 
 def build_parser():
@@ -84,8 +90,8 @@ def build_parser():
     parser.add_argument("--version", action="version", version=f"%(prog)s {version('litscan-2')}")
     sub = parser.add_subparsers(dest="command", required=True, metavar="COMMAND")
 
-    def command(name, func, help, description):
-        p = sub.add_parser(name, help=help, description=description)
+    def command(name, func, summary, description):
+        p = sub.add_parser(name, help=summary, description=description)
         p.set_defaults(func=func, parser=p)
         return p
 
@@ -135,6 +141,8 @@ def build_parser():
                 "if no TEXT is given.")
     model_args(p, required=True)
     p.add_argument("text", nargs="*", help="text to score (default: read lines from stdin)")
+    p.add_argument("--folds", action="store_true",
+                   help="add each fold's decision value and probability (comma-separated)")
     return parser
 
 
