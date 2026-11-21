@@ -32,6 +32,15 @@ litscan_2.scan_shards(scanner, "shards/", "out/")     # a directory of JATS .xml
 mentions = pl.read_parquet("out/mentions/*.parquet")  # term_id, pmcid, section, symbol, sentence, sentence_offset
 ```
 
+Or from the command line:
+
+```bash
+litscan-2 scan terms.tsv shards/ -o out/
+litscan-2 paragraphs out/mentions/ shards/ -o paragraphs.parquet
+```
+
+See the [CLI docs](https://afg1.github.io/litscan-2/cli/) for all commands.
+
 An optional abstract classifier can score each article for RNA relevance, or
 skip articles that score low. See the
 [docs](https://afg1.github.io/litscan-2/classifier/).
