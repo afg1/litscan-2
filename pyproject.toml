@@ -19,6 +19,9 @@ dependencies = [
     "tqdm>=4.67.3",
 ]
 
+[project.scripts]
+litscan-2 = "litscan_2.cli:main"
+
 [project.urls]
 Documentation = "https://afg1.github.io/litscan-2/"
 Repository = "https://github.com/afg1/litscan-2"

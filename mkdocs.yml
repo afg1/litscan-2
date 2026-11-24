@@ -46,6 +46,7 @@ nav:
   - Home: index.md
   - How it works: how-it-works.md
   - Python usage: usage.md
+  - Command line: cli.md
   - Output files: outputs.md
   - RNA relevance filter: classifier.md
   - Open questions: open-questions.md

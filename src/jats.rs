@@ -372,7 +372,15 @@ pub fn parse_article_node(article_node: roxmltree::Node) -> JatsArticle {
         .descendants()
         .filter(|n| n.has_tag_name("contrib"))
     {
-        if contrib.attribute("contrib-type") == Some("author") {
+        // JATS puts the role on the contrib or, when the contrib has none,
+        // on its group: <contrib-group content-type="author"><contrib>.
+        let role = contrib.attribute("contrib-type").or_else(|| {
+            contrib
+                .ancestors()
+                .find(|n| n.has_tag_name("contrib-group"))
+                .and_then(|g| g.attribute("content-type"))
+        });
+        if role == Some("author") {
             if let Some(name_node) = contrib.descendants().find(|n| n.has_tag_name("name")) {
                 let surname = name_node
                     .descendants()
@@ -994,6 +1002,28 @@ mod tests {
         assert_eq!(a.authors_string().as_deref(), Some("Smith, Jo; Onlysurname"));
         assert!(a.title.is_none());
         assert!(a.sections.is_empty());
+    }
+
+    #[test]
+    fn authors_from_group_level_role() {
+        // PMC350664 style: role on the group, bare <contrib>s.
+        let xml = r#"<?xml version="1.0"?>
+<article>
+  <front><article-meta>
+    <contrib-group content-type="author">
+      <contrib><name><surname>Hutvágner</surname><given-names>György</given-names></name></contrib>
+      <contrib><name><surname>Simard</surname><given-names>Martin J</given-names></name></contrib>
+    </contrib-group>
+    <contrib-group content-type="editor">
+      <contrib><name><surname>Editor</surname><given-names>Ed</given-names></name></contrib>
+    </contrib-group>
+    <contrib-group>
+      <contrib contrib-type="editor"><name><surname>Other</surname><given-names>Ed</given-names></name></contrib>
+    </contrib-group>
+  </article-meta></front>
+</article>"#;
+        let a = parse(xml).expect("parse");
+        assert_eq!(a.authors_string().as_deref(), Some("Hutvágner, György; Simard, Martin J"));
     }
 
     #[test]

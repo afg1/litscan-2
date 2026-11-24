@@ -324,7 +324,7 @@ fn scan_shard(
     filter_model: Option<&classifier::TfidfClassifier>,
     min_probability: Option<f64>,
 ) -> PyResult<Counts> {
-    let c = py.allow_threads(|| {
+    let c = py.detach(|| {
         scan_shard_inner(searcher, Path::new(&shard_path), Path::new(&output_dir), filter_model, min_probability, None)
     })?;
     Ok(counts_tuple(c))
@@ -340,7 +340,7 @@ fn scan_shards(
     filter_model: Option<&classifier::TfidfClassifier>,
     min_probability: Option<f64>,
     n_decompress: Option<usize>,
-    progress_callback: Option<PyObject>,
+    progress_callback: Option<Py<PyAny>>,
 ) -> PyResult<Counts> {
     let ncpu = std::thread::available_parallelism()
         .map(|n| n.get())
@@ -364,7 +364,7 @@ fn scan_shards(
     let totals = Mutex::new(ShardCounts::default());
     let callback = progress_callback.as_ref();
 
-    py.allow_threads(|| {
+    py.detach(|| {
         thread::scope(|s| -> PyResult<()> {
             let mut handles = Vec::with_capacity(n_decomp);
             for _ in 0..n_decomp {
@@ -384,7 +384,7 @@ fn scan_shards(
                             t.notices += c.notices;
                         }
                         if let Some(cb) = callback {
-                            Python::with_gil(|py| -> PyResult<()> {
+                            Python::attach(|py| -> PyResult<()> {
                                 cb.call1(py, (shard.to_string_lossy().into_owned(),))?;
                                 Ok(())
                             })?;
